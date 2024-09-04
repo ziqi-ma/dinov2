@@ -13,7 +13,7 @@ from torchmetrics import MetricCollection
 from dinov2.data import DatasetWithEnumeratedTargets, SamplerType, make_data_loader
 import dinov2.distributed as distributed
 from dinov2.logging import MetricLogger
-
+from dinov2.data.datasets import collate_fn
 
 logger = logging.getLogger("dinov2")
 
@@ -63,9 +63,12 @@ def evaluate(
     metric_logger = MetricLogger(delimiter="  ")
     header = "Test:"
 
-    for samples, targets, *_ in metric_logger.log_every(data_loader, 10, header):
-        outputs = model(samples.to(device))
-        targets = targets.to(device)
+    for data, *_ in metric_logger.log_every(data_loader, 10, header):
+        targets = data["label"].cuda()
+        for key in data.keys():
+            if isinstance(data[key], torch.Tensor):
+                data[key] = data[key].cuda(non_blocking=True)
+        outputs = model(data).float()
 
         if criterion is not None:
             loss = criterion(outputs, targets)
@@ -96,15 +99,18 @@ def all_gather_and_flatten(tensor_rank):
 
 
 def extract_features(model, dataset, batch_size, num_workers, gather_on_cpu=False):
-    dataset_with_enumerated_targets = DatasetWithEnumeratedTargets(dataset)
-    sample_count = len(dataset_with_enumerated_targets)
+    #dataset_with_enumerated_targets = DatasetWithEnumeratedTargets(dataset)
+    sample_count = len(dataset)
+    print(sample_count)
     data_loader = make_data_loader(
-        dataset=dataset_with_enumerated_targets,
+        dataset=dataset,
         batch_size=batch_size,
         num_workers=num_workers,
-        sampler_type=SamplerType.DISTRIBUTED,
+        sampler_type=SamplerType.EPOCH,
+        sampler_size = sample_count,
         drop_last=False,
         shuffle=False,
+        collate_fn=collate_fn
     )
     return extract_features_with_dataloader(model, data_loader, sample_count, gather_on_cpu)
 
@@ -114,11 +120,13 @@ def extract_features_with_dataloader(model, data_loader, sample_count, gather_on
     gather_device = torch.device("cpu") if gather_on_cpu else torch.device("cuda")
     metric_logger = MetricLogger(delimiter="  ")
     features, all_labels = None, None
-    for samples, (index, labels_rank) in metric_logger.log_every(data_loader, 10):
-        samples = samples.cuda(non_blocking=True)
-        labels_rank = labels_rank.cuda(non_blocking=True)
-        index = index.cuda(non_blocking=True)
-        features_rank = model(samples).float()
+    for data in metric_logger.log_every(data_loader, 10):
+        labels_rank = data["label"].cuda()
+        index = data["index"].cuda()
+        for key in data.keys():
+            if isinstance(data[key], torch.Tensor):
+                data[key] = data[key].cuda(non_blocking=True)
+        features_rank = model(data).float()
 
         # init storage feature matrix
         if features is None:

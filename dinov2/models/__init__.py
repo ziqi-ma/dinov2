@@ -6,11 +6,11 @@
 import logging
 
 from . import vision_transformer as vits
-
+from .pt3.model import PointTransformerV3
 
 logger = logging.getLogger("dinov2")
 
-
+'''
 def build_model(args, only_teacher=False, img_size=224):
     args.arch = args.arch.removesuffix("_memeff")
     if "vit" in args.arch:
@@ -37,7 +37,13 @@ def build_model(args, only_teacher=False, img_size=224):
         )
         embed_dim = student.embed_dim
     return student, teacher, embed_dim
+'''
 
+def build_model(args, only_teacher=False):
+    teacher = PointTransformerV3()
+    student = PointTransformerV3()
+    embed_dim = student.embed_dim
+    return student, teacher, embed_dim
 
 def build_model_from_cfg(cfg, only_teacher=False):
-    return build_model(cfg.student, only_teacher=only_teacher, img_size=cfg.crops.global_crops_size)
+    return build_model(cfg.student, only_teacher=only_teacher)

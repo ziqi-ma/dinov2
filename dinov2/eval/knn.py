@@ -21,7 +21,7 @@ from dinov2.eval.metrics import AccuracyAveraging, build_topk_accuracy_metric
 from dinov2.eval.setup import get_args_parser as get_setup_args_parser
 from dinov2.eval.setup import setup_and_build_model
 from dinov2.eval.utils import ModelWithNormalize, evaluate, extract_features
-
+from dinov2.data.datasets import collate_fn
 
 logger = logging.getLogger("dinov2")
 
@@ -267,10 +267,12 @@ def eval_knn(
         dataset=val_dataset,
         batch_size=batch_size,
         num_workers=num_workers,
-        sampler_type=SamplerType.DISTRIBUTED,
+        sampler_type=SamplerType.EPOCH,
+        sampler_size=len(val_dataset),
         drop_last=False,
         shuffle=False,
         persistent_workers=True,
+        collate_fn=collate_fn
     )
     num_classes = train_labels.max() + 1
     metric_collection = build_topk_accuracy_metric(accuracy_averaging, num_classes=num_classes)
@@ -318,44 +320,33 @@ def eval_knn(
 def eval_knn_with_model(
     model,
     output_dir,
-    train_dataset_str="ImageNet:split=TRAIN",
-    val_dataset_str="ImageNet:split=VAL",
+    train_dataset,
+    val_dataset,
     nb_knn=(10, 20, 100, 200),
     temperature=0.07,
     autocast_dtype=torch.float,
     accuracy_averaging=AccuracyAveraging.MEAN_ACCURACY,
-    transform=None,
     gather_on_cpu=False,
     batch_size=256,
     num_workers=5,
     n_per_class_list=[-1],
     n_tries=1,
 ):
-    transform = transform or make_classification_eval_transform()
-
-    train_dataset = make_dataset(
-        dataset_str=train_dataset_str,
-        transform=transform,
+    #with torch.cuda.amp.autocast(dtype=autocast_dtype):
+    print("gonna eval")
+    results_dict_knn = eval_knn(
+        model=model,
+        train_dataset=train_dataset,
+        val_dataset=val_dataset,
+        accuracy_averaging=accuracy_averaging,
+        nb_knn=nb_knn,
+        temperature=temperature,
+        batch_size=batch_size,
+        num_workers=num_workers,
+        gather_on_cpu=gather_on_cpu,
+        n_per_class_list=n_per_class_list,
+        n_tries=n_tries,
     )
-    val_dataset = make_dataset(
-        dataset_str=val_dataset_str,
-        transform=transform,
-    )
-
-    with torch.cuda.amp.autocast(dtype=autocast_dtype):
-        results_dict_knn = eval_knn(
-            model=model,
-            train_dataset=train_dataset,
-            val_dataset=val_dataset,
-            accuracy_averaging=accuracy_averaging,
-            nb_knn=nb_knn,
-            temperature=temperature,
-            batch_size=batch_size,
-            num_workers=num_workers,
-            gather_on_cpu=gather_on_cpu,
-            n_per_class_list=n_per_class_list,
-            n_tries=n_tries,
-        )
 
     results_dict = {}
     if distributed.is_main_process():

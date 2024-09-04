@@ -8,10 +8,10 @@ import logging
 import math
 import os
 from functools import partial
-
+import numpy as np
 from fvcore.common.checkpoint import PeriodicCheckpointer
 import torch
-
+import wandb
 from dinov2.data import SamplerType, make_data_loader, make_dataset
 from dinov2.data import collate_data_and_cast, DataAugmentationDINO, MaskingGenerator
 import dinov2.distributed as distributed
@@ -19,7 +19,8 @@ from dinov2.fsdp import FSDPCheckpointer
 from dinov2.logging import MetricLogger
 from dinov2.utils.config import setup
 from dinov2.utils.utils import CosineScheduler
-
+from dinov2.eval.knn import eval_knn_with_model
+from dinov2.data.datasets import ObjaverseAugmented, ObjaverseEval, collate_fn
 from dinov2.train.ssl_meta_arch import SSLMetaArch
 
 
@@ -54,6 +55,7 @@ For python-based LazyConfig, use "path.key=value".
         type=str,
         help="Output directory to save logs and checkpoints",
     )
+    parser.add_argument("--local-rank", default=0, type=int, help="Variable for distributed computing.") 
 
     return parser
 
@@ -119,16 +121,38 @@ def apply_optim_scheduler(optimizer, lr, wd, last_layer_lr):
         param_group["lr"] = (last_layer_lr if is_last_layer else lr) * lr_multiplier
 
 
-def do_test(cfg, model, iteration):
+def do_test(cfg, model, test_loader, teacher_temp, train_knn_dataset, val_knn_dataset, iteration):
+    print("doing test")
     new_state_dict = model.teacher.state_dict()
+    iterstring = str(iteration)
+    eval_dir = os.path.join(cfg.train.output_dir, "eval", iterstring)
 
     if distributed.is_main_process():
-        iterstring = str(iteration)
-        eval_dir = os.path.join(cfg.train.output_dir, "eval", iterstring)
         os.makedirs(eval_dir, exist_ok=True)
         # save teacher checkpoint
         teacher_ckp_path = os.path.join(eval_dir, "teacher_checkpoint.pth")
         torch.save({"teacher": new_state_dict}, teacher_ckp_path)
+
+    # TODO: figure out parallelization stuff, this is in the parallelized context
+    global_loss_list = []
+    with torch.no_grad():
+        for data in test_loader:
+            loss_dict = model.forward_backward(data, teacher_temp=teacher_temp, backward=False)
+        global_loss_list.append(loss_dict["dino_global_crops_loss"].item())
+    mean_loss = np.mean(global_loss_list)
+    '''
+    model.teacher.backbone.eval()
+    with torch.no_grad():
+        knn_res = eval_knn_with_model(model.teacher.backbone, eval_dir, train_knn_dataset, val_knn_dataset)
+    model.teacher.backbone.train()
+    print("----------a------------")
+    print(knn_res)
+    '''
+    
+    print(mean_loss)
+    return mean_loss, 0,0#knn_res["(-1,20) Top 1"], knn_res["(-1,20) Top 5"]
+
+
 
 
 def do_train(cfg, model, resume=False):
@@ -166,45 +190,34 @@ def do_train(cfg, model, resume=False):
 
     img_size = cfg.crops.global_crops_size
     patch_size = cfg.student.patch_size
-    n_tokens = (img_size // patch_size) ** 2
-    mask_generator = MaskingGenerator(
-        input_size=(img_size // patch_size, img_size // patch_size),
-        max_num_patches=0.5 * img_size // patch_size * img_size // patch_size,
-    )
-
-    data_transform = DataAugmentationDINO(
-        cfg.crops.global_crops_scale,
-        cfg.crops.local_crops_scale,
-        cfg.crops.local_crops_number,
-        global_crops_size=cfg.crops.global_crops_size,
-        local_crops_size=cfg.crops.local_crops_size,
-    )
-
-    collate_fn = partial(
-        collate_data_and_cast,
-        mask_ratio_tuple=cfg.ibot.mask_ratio_min_max,
-        mask_probability=cfg.ibot.mask_sample_probability,
-        n_tokens=n_tokens,
-        mask_generator=mask_generator,
-        dtype=inputs_dtype,
-    )
 
     # setup data loader
-
-    dataset = make_dataset(
-        dataset_str=cfg.train.dataset_path,
-        transform=data_transform,
-        target_transform=lambda _: (),
-    )
+    train_dataset = ObjaverseAugmented(split='train', root="/data/ziqi/objaverse/pretrain")
+    val_dataset = ObjaverseAugmented(split='test', root="/data/ziqi/objaverse/pretrain")
+    train_knn_dataset = ObjaverseEval(split='train', root="/data/ziqi/objaverse/pretrain")
+    val_knn_dataset = ObjaverseEval(split='test', root="/data/ziqi/objaverse/pretrain")
     # sampler_type = SamplerType.INFINITE
-    sampler_type = SamplerType.SHARDED_INFINITE
-    data_loader = make_data_loader(
-        dataset=dataset,
+    train_sampler_type = SamplerType.SHARDED_INFINITE
+    val_sampler_type = SamplerType.EPOCH
+    train_loader = make_data_loader(
+        dataset=train_dataset,
         batch_size=cfg.train.batch_size_per_gpu,
         num_workers=cfg.train.num_workers,
         shuffle=True,
         seed=start_iter,  # TODO: Fix this -- cfg.train.seed
-        sampler_type=sampler_type,
+        sampler_type=train_sampler_type,
+        sampler_advance=0,  # TODO(qas): fix this -- start_iter * cfg.train.batch_size_per_gpu,
+        drop_last=True,
+        collate_fn=collate_fn,
+    )
+    val_loader = make_data_loader(
+        dataset=val_dataset,
+        batch_size=cfg.train.batch_size_per_gpu,
+        num_workers=cfg.train.num_workers,
+        shuffle=True,
+        seed=start_iter,  # TODO: Fix this -- cfg.train.seed
+        sampler_type=val_sampler_type,
+        sampler_size = len(val_dataset),
         sampler_advance=0,  # TODO(qas): fix this -- start_iter * cfg.train.batch_size_per_gpu,
         drop_last=True,
         collate_fn=collate_fn,
@@ -220,13 +233,13 @@ def do_train(cfg, model, resume=False):
     header = "Training"
 
     for data in metric_logger.log_every(
-        data_loader,
-        10,
+        train_loader,
+        50,
         header,
         max_iter,
         start_iter,
     ):
-        current_batch_size = data["collated_global_crops"].shape[0] / 2
+        current_batch_size = data["offset"].shape[0] / 2
         if iteration > max_iter:
             return
 
@@ -281,12 +294,22 @@ def do_train(cfg, model, resume=False):
         metric_logger.update(last_layer_lr=last_layer_lr)
         metric_logger.update(current_batch_size=current_batch_size)
         metric_logger.update(total_loss=losses_reduced, **loss_dict_reduced)
+        if iteration % 50 == 0:
+            wandb.log(loss_dict_reduced, step=iteration, commit=True)
 
         # checkpointing and testing
 
         if cfg.evaluation.eval_period_iterations > 0 and (iteration + 1) % cfg.evaluation.eval_period_iterations == 0:
-            do_test(cfg, model, f"training_{iteration}")
+            val_global_loss, knn_top1, knn_top5 = do_test(cfg, model, val_loader, teacher_temp, train_knn_dataset, val_knn_dataset, f"training_{iteration}")
+            metric_logger.update(val_global_loss=val_global_loss)
+            metric_logger.update(knn_top1=knn_top1)
+            metric_logger.update(knn_top5=knn_top5)
             torch.cuda.synchronize()
+            eval_losses_dict = {"val global loss":val_global_loss,
+                                "knn top 1": knn_top1,
+                                "knn top 5": knn_top5}
+            print(eval_losses_dict)
+            wandb.log(eval_losses_dict, step=iteration, commit=True)
         periodic_checkpointer.step(iteration)
 
         iteration = iteration + 1
@@ -296,6 +319,7 @@ def do_train(cfg, model, resume=False):
 
 def main(args):
     cfg = setup(args)
+    run = wandb.init(project="backbone_pretrain", config=args)
 
     model = SSLMetaArch(cfg).to(torch.device("cuda"))
     model.prepare_for_distributed_training()
@@ -315,4 +339,5 @@ def main(args):
 
 if __name__ == "__main__":
     args = get_args_parser(add_help=True).parse_args()
+    
     main(args)
