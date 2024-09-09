@@ -138,7 +138,7 @@ class SSLMetaArch(nn.Module):
             if isinstance(data[key], torch.Tensor):
                 data[key] = data[key].cuda(non_blocking=True)
 
-        n_local_crops_loss_terms = max(n_local_crops * n_global_crops, 1)
+        n_local_crops_loss_terms = 0#max(n_local_crops * n_global_crops, 1)
         n_global_crops_loss_terms = (n_global_crops - 1) * n_global_crops
 
         do_dino = self.do_dino
@@ -229,13 +229,16 @@ class SSLMetaArch(nn.Module):
 
         teacher_dino_softmaxed_centered_list, masked_teacher_ibot_softmaxed_centered = get_teacher_output()
         reshard_fsdp_model(self.teacher)
-
+        
         loss_dict = {}
 
         loss_accumulator = 0  # for backprop
+        self.student.eval() # to disable dropout and use batchnorm's eval mode, otherwise
+        # this is very different from teacher since teacher is in eval mode 
         student_global_backbone_output_dict = self.student.backbone(
             data, is_training=True
         )
+        self.student.train()
 
         inputs_for_student_head_list = []
 
@@ -374,6 +377,7 @@ class SSLMetaArch(nn.Module):
                     teacher_param_list += mt.params
             torch._foreach_mul_(teacher_param_list, m)
             torch._foreach_add_(teacher_param_list, student_param_list, alpha=1 - m)
+                    
 
     def train(self):
         super().train()

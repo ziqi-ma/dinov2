@@ -140,10 +140,7 @@ class ObjaverseAugmented(data.Dataset):
         self,
         *,
         split: str, # train/test/val
-        root: str,
-        transforms: Optional[Callable] = None,
-        transform: Optional[Callable] = None,
-        target_transform: Optional[Callable] = None
+        root: str
     ) -> None:
         self.dirpath = f"{root}/{split}"
         self.objs = os.listdir(self.dirpath)
@@ -188,6 +185,41 @@ class ObjaverseEval(data.Dataset):
         point_dict = prep_points_val(pts_xyz, pts_rgb, normal)
         point_dict["label"] = self.label2idx[("_").join(cur_obj.split("_")[:-1])]
         point_dict["index"] = index
+        point_dict["path"] = obj_dir
+        return point_dict
+
+    def __len__(self) -> int:
+        return len(self.objs)
+    
+
+class ObjaverseEvalSubset(data.Dataset):
+    def __init__(
+        self,
+        *,
+        split: str, # train/test/val
+        root: str,
+        test_subset_idxs: list
+    ) -> None:
+        self.dirpath = f"{root}/{split}"
+        self.objs = [os.listdir(self.dirpath)[idx] for idx in test_subset_idxs]
+        self.label2idx = {}
+        i = 0
+        for obj in self.objs:
+            label = ("_").join(obj.split("_")[:-1])
+            if label not in self.label2idx:
+                self.label2idx[label] = i
+                i += 1
+
+    def __getitem__(self, index: int) -> dict:
+        cur_obj = self.objs[index]
+        obj_dir = f"{self.dirpath}/{cur_obj}"
+        pts_xyz = torch.load(f"{obj_dir}/points.pt")
+        normal = torch.load(f"{obj_dir}/normals.pt")
+        pts_rgb = torch.load(f"{obj_dir}/rgb.pt")*255
+        point_dict = prep_points_val(pts_xyz, pts_rgb, normal)
+        point_dict["label"] = self.label2idx[("_").join(cur_obj.split("_")[:-1])]
+        point_dict["index"] = index
+        point_dict["path"] = obj_dir
         return point_dict
 
     def __len__(self) -> int:

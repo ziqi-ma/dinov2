@@ -10,7 +10,8 @@ import logging
 import os
 import sys
 from typing import List, Optional
-
+from dinov2.layers import DINOHead
+from dinov2.utils.config import setup
 import torch
 from torch.nn.functional import one_hot, softmax
 
@@ -22,6 +23,7 @@ from dinov2.eval.setup import get_args_parser as get_setup_args_parser
 from dinov2.eval.setup import setup_and_build_model
 from dinov2.eval.utils import ModelWithNormalize, evaluate, extract_features
 from dinov2.data.datasets import collate_fn
+from dinov2.data.datasets import ObjaverseEval, ObjaverseEvalSubset
 
 logger = logging.getLogger("dinov2")
 
@@ -317,6 +319,51 @@ def eval_knn(
     return results_dict
 
 
+def fetch_k_neighbors(
+    model,
+    dinohead,
+    train_dataset,
+    test_dataset, # expect test dataset to be small
+    nb_knn,
+    batch_size,
+    num_workers,
+    gather_on_cpu
+):
+    #model = ModelWithNormalize(model)
+
+    logger.info("Extracting features for train set...")
+    train_features, _ = extract_features(
+        model, dinohead, train_dataset, batch_size, num_workers, gather_on_cpu=gather_on_cpu
+    )
+    logger.info(f"Train features created, shape {train_features.shape}.")
+
+    test_features, _ = extract_features(
+        model, dinohead, test_dataset, batch_size, num_workers, gather_on_cpu=gather_on_cpu
+    )
+    logger.info(f"Test features created, shape {test_features.shape}.")
+
+    # calculate pairwise similarity, this is normalized so we can take cosine sim
+    pairwise_similarity = test_features @ train_features.T # this should be n_test by n_train
+    print(pairwise_similarity.shape)
+    print(pairwise_similarity)
+    print(pairwise_similarity.min())
+    print(pairwise_similarity[:5,:100])
+
+    # take top k per test sample
+    scores, idxs = torch.topk(pairwise_similarity, nb_knn, dim=1) # expect n_test by nb_knn
+    for i in range(len(test_dataset)):
+        test_item = test_dataset[i]
+        print("test sample:")
+        print(test_item["path"])
+        print("train samples neighbors:")
+        for j in idxs[i,:]:
+            print(train_dataset[j]["path"])
+        print("similarity scores")
+        print(scores)
+    # TODO check extract_features observes the ordering of the dataset
+    return
+
+
 def eval_knn_with_model(
     model,
     output_dir,
@@ -368,7 +415,24 @@ def eval_knn_with_model(
 
 
 def main(args):
-    model, autocast_dtype = setup_and_build_model(args)
+    model, autocast_dtype, embed_dim = setup_and_build_model(args)
+    # for debugging, load dino head
+    dinohead = DINOHead(
+        in_dim=embed_dim,
+        out_dim=65536,
+        hidden_dim=2048,
+        bottleneck_dim=256,
+        nlayers=3)
+    state_dict = torch.load(args.pretrained_weights, map_location="cpu")
+    # remove `module.` prefix
+    state_dict = {k.replace("module.", ""): v for k, v in state_dict.items()}
+    # remove `backbone.` prefix induced by multicrop wrapper
+    state_dict = {k.replace("dino_head.", ""): v for k, v in state_dict.items()}
+    dinohead.load_state_dict(state_dict, strict=False)
+    dinohead = dinohead.cuda()
+    total_params = sum(p.numel() for p in model.parameters())
+    print(f"Number of parameters: {total_params}")
+    '''
     eval_knn_with_model(
         model=model,
         output_dir=args.output_dir,
@@ -385,6 +449,19 @@ def main(args):
         n_per_class_list=args.n_per_class_list,
         n_tries=args.n_tries,
     )
+    '''
+    train_knn_dataset = ObjaverseEval(split='train', root="/data/ziqi/objaverse/pretrain")
+    val_knn_dataset = ObjaverseEvalSubset(split='test', root="/data/ziqi/objaverse/pretrain", test_subset_idxs = [20,65,100,325,1000])
+    fetch_k_neighbors(
+        model,
+        dinohead,
+        train_knn_dataset,
+        val_knn_dataset, # expect test dataset to be small
+        6,
+        64,
+        5,
+        gather_on_cpu=args.gather_on_cpu
+    )
     return 0
 
 
@@ -392,4 +469,5 @@ if __name__ == "__main__":
     description = "DINOv2 k-NN evaluation"
     args_parser = get_args_parser(description=description)
     args = args_parser.parse_args()
+    args.pretrained_weights = "/data/ziqi/training_checkpts/dinotry/eval/training_5999/teacher_checkpoint.pth"
     sys.exit(main(args))

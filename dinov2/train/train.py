@@ -122,7 +122,6 @@ def apply_optim_scheduler(optimizer, lr, wd, last_layer_lr):
 
 
 def do_test(cfg, model, test_loader, teacher_temp, train_knn_dataset, val_knn_dataset, iteration):
-    print("doing test")
     new_state_dict = model.teacher.state_dict()
     iterstring = str(iteration)
     eval_dir = os.path.join(cfg.train.output_dir, "eval", iterstring)
@@ -131,6 +130,7 @@ def do_test(cfg, model, test_loader, teacher_temp, train_knn_dataset, val_knn_da
         os.makedirs(eval_dir, exist_ok=True)
         # save teacher checkpoint
         teacher_ckp_path = os.path.join(eval_dir, "teacher_checkpoint.pth")
+        print(f"saveing teacher at {teacher_ckp_path}")
         torch.save({"teacher": new_state_dict}, teacher_ckp_path)
 
     # TODO: figure out parallelization stuff, this is in the parallelized context
@@ -138,7 +138,7 @@ def do_test(cfg, model, test_loader, teacher_temp, train_knn_dataset, val_knn_da
     with torch.no_grad():
         for data in test_loader:
             loss_dict = model.forward_backward(data, teacher_temp=teacher_temp, backward=False)
-        global_loss_list.append(loss_dict["dino_global_crops_loss"].item())
+            global_loss_list.append(loss_dict["dino_global_crops_loss"].item())
     mean_loss = np.mean(global_loss_list)
     '''
     model.teacher.backbone.eval()
@@ -298,7 +298,7 @@ def do_train(cfg, model, resume=False):
             wandb.log(loss_dict_reduced, step=iteration, commit=True)
 
         # checkpointing and testing
-
+        
         if cfg.evaluation.eval_period_iterations > 0 and (iteration + 1) % cfg.evaluation.eval_period_iterations == 0:
             val_global_loss, knn_top1, knn_top5 = do_test(cfg, model, val_loader, teacher_temp, train_knn_dataset, val_knn_dataset, f"training_{iteration}")
             metric_logger.update(val_global_loss=val_global_loss)
@@ -310,6 +310,7 @@ def do_train(cfg, model, resume=False):
                                 "knn top 5": knn_top5}
             print(eval_losses_dict)
             wandb.log(eval_losses_dict, step=iteration, commit=True)
+        
         periodic_checkpointer.step(iteration)
 
         iteration = iteration + 1

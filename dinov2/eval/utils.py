@@ -9,7 +9,7 @@ from typing import Dict, Optional
 import torch
 from torch import nn
 from torchmetrics import MetricCollection
-
+import torch.nn.functional as F
 from dinov2.data import DatasetWithEnumeratedTargets, SamplerType, make_data_loader
 import dinov2.distributed as distributed
 from dinov2.logging import MetricLogger
@@ -98,10 +98,9 @@ def all_gather_and_flatten(tensor_rank):
     return tensor_all_ranks.flatten(end_dim=1)
 
 
-def extract_features(model, dataset, batch_size, num_workers, gather_on_cpu=False):
+def extract_features(model, dinohead, dataset, batch_size, num_workers, gather_on_cpu=False):
     #dataset_with_enumerated_targets = DatasetWithEnumeratedTargets(dataset)
     sample_count = len(dataset)
-    print(sample_count)
     data_loader = make_data_loader(
         dataset=dataset,
         batch_size=batch_size,
@@ -112,11 +111,11 @@ def extract_features(model, dataset, batch_size, num_workers, gather_on_cpu=Fals
         shuffle=False,
         collate_fn=collate_fn
     )
-    return extract_features_with_dataloader(model, data_loader, sample_count, gather_on_cpu)
+    return extract_features_with_dataloader(model, dinohead, data_loader, sample_count, gather_on_cpu)
 
 
 @torch.inference_mode()
-def extract_features_with_dataloader(model, data_loader, sample_count, gather_on_cpu=False):
+def extract_features_with_dataloader(model, dinohead, data_loader, sample_count, gather_on_cpu=False):
     gather_device = torch.device("cpu") if gather_on_cpu else torch.device("cuda")
     metric_logger = MetricLogger(delimiter="  ")
     features, all_labels = None, None
@@ -127,6 +126,9 @@ def extract_features_with_dataloader(model, data_loader, sample_count, gather_on
             if isinstance(data[key], torch.Tensor):
                 data[key] = data[key].cuda(non_blocking=True)
         features_rank = model(data).float()
+        features_rank = dinohead(features_rank).float()
+        features_rank = F.softmax((features_rank/0.07), dim=-1)
+        features_rank = nn.functional.normalize(features_rank, dim=1, p=2)
 
         # init storage feature matrix
         if features is None:

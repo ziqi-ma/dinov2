@@ -43,6 +43,8 @@ def build_model(args, only_teacher=False):
     teacher = PointTransformerV3()
     student = PointTransformerV3()
     embed_dim = student.embed_dim
+    if only_teacher:
+        return teacher, embed_dim
     return student, teacher, embed_dim
 
 def build_model_from_cfg(cfg, only_teacher=False):
