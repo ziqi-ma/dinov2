@@ -908,7 +908,6 @@ class GridSample(object):
         return hashed_arr
 
 
-# for now don't worry about this bc it makes the mask2pt unaligned
 class SphereCrop(object):
     def __init__(self, point_max=80000, sample_rate=None, mode="random"):
         self.point_max = point_max

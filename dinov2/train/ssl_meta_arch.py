@@ -8,7 +8,7 @@ import logging
 
 import torch
 from torch import nn
-
+import torch.nn.functional as F
 from dinov2.loss import DINOLoss, iBOTPatchLoss, KoLeoLoss
 from dinov2.models import build_model_from_cfg
 from dinov2.layers import DINOHead
@@ -138,7 +138,7 @@ class SSLMetaArch(nn.Module):
             if isinstance(data[key], torch.Tensor):
                 data[key] = data[key].cuda(non_blocking=True)
 
-        n_local_crops_loss_terms = 0#max(n_local_crops * n_global_crops, 1)
+        n_local_crops_loss_terms = max(n_local_crops * n_global_crops, 1)
         n_global_crops_loss_terms = (n_global_crops - 1) * n_global_crops
 
         do_dino = self.do_dino
@@ -154,6 +154,8 @@ class SSLMetaArch(nn.Module):
             teacher_backbone_output_dict = self.teacher.backbone(data, is_training=True)
             teacher_cls_tokens = teacher_backbone_output_dict["x_norm_clstoken"]
             teacher_cls_tokens = teacher_cls_tokens.chunk(n_global_crops_teacher)
+            #print("teacher cls tokens")
+            #print(teacher_cls_tokens)
             # watch out: these are chunked and cat'd in reverse so A is matched to B in the global crops dino loss
             teacher_cls_tokens = torch.cat((teacher_cls_tokens[1], teacher_cls_tokens[0]))
             ibot_teacher_patch_tokens = teacher_backbone_output_dict["x_norm_patchtokens"]
@@ -195,7 +197,7 @@ class SSLMetaArch(nn.Module):
 
             if self.cfg.train.centering == "centering":
                 teacher_dino_softmaxed_centered_list = self.dino_loss.softmax_center_teacher(
-                    teacher_cls_tokens_after_head, teacher_temp=teacher_temp
+                    teacher_cls_tokens_after_head, teacher_temp=teacher_temp, update_center=backward # if not training, don't update center
                 ).view(n_global_crops_teacher, -1, *teacher_cls_tokens_after_head.shape[1:])
                 self.dino_loss.update_center(teacher_cls_tokens_after_head)
                 '''
@@ -233,21 +235,25 @@ class SSLMetaArch(nn.Module):
         loss_dict = {}
 
         loss_accumulator = 0  # for backprop
-        self.student.eval() # to disable dropout and use batchnorm's eval mode, otherwise
+        #self.student.eval() # to disable dropout and use batchnorm's eval mode, otherwise
         # this is very different from teacher since teacher is in eval mode 
-        student_global_backbone_output_dict = self.student.backbone(
-            data, is_training=True
+        student_backbone_output_dict = self.student.backbone(
+            data, is_training=True, include_local=True
         )
-        self.student.train()
+        #self.student.train()
 
         inputs_for_student_head_list = []
 
         # 1a: local crops cls tokens
-        #student_local_cls_tokens = student_local_backbone_output_dict["x_norm_clstoken"]
-        #inputs_for_student_head_list.append(student_local_cls_tokens.unsqueeze(0))
+        student_local_cls_tokens = student_backbone_output_dict["local_x_norm_clstoken"]
+        #print("student local tokens")
+        #print(student_local_cls_tokens)
+        inputs_for_student_head_list.append(student_local_cls_tokens.unsqueeze(0))
 
         # 1b: global crops cls tokens
-        student_global_cls_tokens = student_global_backbone_output_dict["x_norm_clstoken"]
+        student_global_cls_tokens = student_backbone_output_dict["x_norm_clstoken"]
+        #print("student global tokens")
+        #print(student_global_cls_tokens)
         inputs_for_student_head_list.append(student_global_cls_tokens.unsqueeze(0))
 
         # 1c: global crops patch tokens
@@ -269,14 +275,14 @@ class SSLMetaArch(nn.Module):
 
         # 2: run
         _attn_bias, cat_inputs = fmha.BlockDiagonalMask.from_tensor_list(inputs_for_student_head_list)
-        outputs_list = _attn_bias.split(self.student.dino_head(cat_inputs))
+        outputs_list = _attn_bias.split(self.student.dino_head(cat_inputs)) # DOUBLE CHECK but I THINK LOCAL CROPS CAN SHARE INFO AMONG EACH OTHER
         # this is just for parallelization - essentially just concat local and global, and have a diagonal block
         # matrix which confines attention to within-local and within-global, then when you split you re-get a list
         # as if you perform the action individually
 
 
         # 3a: local crops cls tokens
-        #student_local_cls_tokens_after_head = outputs_list.pop(0).squeeze(0)
+        student_local_cls_tokens_after_head = outputs_list.pop(0).squeeze(0)
 
         # 3b: global crops cls tokens
         student_global_cls_tokens_after_head = outputs_list.pop(0).squeeze(0)
@@ -286,19 +292,40 @@ class SSLMetaArch(nn.Module):
         if do_ibot and not self.ibot_separate_head:
             student_global_masked_patch_tokens_after_head = outputs_list.pop(0).squeeze(0)[:n_masked_patches]
         '''
-        '''
+        student_glb_softmax = F.softmax(student_global_cls_tokens_after_head/0.1, dim=-1)
+        student_gl_min = student_glb_softmax.min()
+        student_gl_max = student_glb_softmax.max()
+        student_gl_mean = student_glb_softmax.mean()
+        student_local_softmax = F.softmax(student_local_cls_tokens_after_head/0.1, dim=-1)
+        student_local_min = student_local_softmax.min()
+        student_local_max = student_local_softmax.max()
+        student_local_mean = student_local_softmax.mean()
+        teacher_min = teacher_dino_softmaxed_centered_list.min()
+        teacher_max = teacher_dino_softmaxed_centered_list.max()
+        teacher_mean = teacher_dino_softmaxed_centered_list.mean()
+        loss_dict["student_gl_min"]=student_gl_min
+        loss_dict["student_gl_max"]=student_gl_max
+        loss_dict["student_gl_mean"]=student_gl_mean
+        loss_dict["student_local_min"]=student_local_min
+        loss_dict["student_local_max"]=student_local_max
+        loss_dict["student_local_mean"]=student_local_mean
+        loss_dict["teacher_min"]=teacher_min
+        loss_dict["teacher_max"]=teacher_max
+        loss_dict["teacher_mean"]=teacher_mean
         if n_local_crops > 0:
             dino_local_crops_loss = self.dino_loss(
-                student_output_list=student_local_cls_tokens_after_head.chunk(n_local_crops),
-                teacher_out_softmaxed_centered_list=teacher_dino_softmaxed_centered_list,
+                student_output_list=student_local_cls_tokens_after_head.chunk(n_local_crops), # this is all local crops
+                teacher_out_softmaxed_centered_list=teacher_dino_softmaxed_centered_list, # this is 2 versions of teacher
             ) / (n_global_crops_loss_terms + n_local_crops_loss_terms)
+            # a CE loss is calculated per (crop, global aug) pair, this corresponds to n_local_crops_loss_terms (n_global=2*n_crops)
+            # just that normalization happens early before adding w/ global loss so divide by (n_global+n_local)
 
             # store for display
             loss_dict["dino_local_crops_loss"] = dino_local_crops_loss
 
             # accumulate loss
             loss_accumulator += self.dino_loss_weight * dino_local_crops_loss
-        '''
+        
         # process global crops
         loss_scales = 2  # this is here since we process global crops together
 
@@ -314,6 +341,9 @@ class SSLMetaArch(nn.Module):
                 * loss_scales
                 / (n_global_crops_loss_terms + n_local_crops_loss_terms)
             )
+            # scale is because global losses are processed together
+            # this is n_global_crops_loss_terms = 2*1=2
+            # just that normalization happens early before adding w/ global loss so divide by (n_global+n_local)
 
             loss_dict["dino_global_crops_loss"] = dino_global_crops_loss
 

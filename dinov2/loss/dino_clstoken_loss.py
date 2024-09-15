@@ -26,11 +26,11 @@ class DINOLoss(nn.Module):
         self.async_batch_center = None
 
     @torch.no_grad()
-    def softmax_center_teacher(self, teacher_output, teacher_temp):
-        self.apply_center_update()
+    def softmax_center_teacher(self, teacher_output, teacher_temp, update_center=True):
+        if update_center:
+            self.apply_center_update()
         # teacher centering and sharpening
-        return F.softmax((teacher_output) / teacher_temp, dim=-1)
-        #return F.softmax((teacher_output - self.center) / teacher_temp, dim=-1)
+        return F.softmax((teacher_output - self.center) / teacher_temp, dim=-1)
 
     @torch.no_grad()
     def sinkhorn_knopp_teacher(self, teacher_output, teacher_temp, n_iterations=3):
@@ -67,7 +67,7 @@ class DINOLoss(nn.Module):
         """
         # TODO: Use cross_entropy_distribution here
         total_loss = 0
-        # both lists are length 1, stacked in the correct way so that studentaug1 corresponds to teacher aug2 etc.
+        # for global, both lists are length 1, stacked in the correct way so that studentaug1 corresponds to teacher aug2 etc.
         for s in student_output_list:
             lsm = F.log_softmax(s / self.student_temp, dim=-1)
             for t in teacher_out_softmaxed_centered_list:

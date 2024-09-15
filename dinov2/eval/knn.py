@@ -139,7 +139,7 @@ class KnnModule(torch.nn.Module):
         torch.distributed.broadcast(broadcasted, source_rank)
 
         # Compute the neighbors for `source_rank` among `train_features_rank_T`
-        similarity_rank = torch.mm(broadcasted, self.train_features_rank_T)
+        similarity_rank = torch.mm(broadcasted, self.train_features_rank_T.half())
         candidate_labels = self.candidates.expand(len(similarity_rank), -1)
         return self._get_knn_sims_and_labels(similarity_rank, candidate_labels)
 
@@ -261,7 +261,7 @@ def eval_knn(
 
     logger.info("Extracting features for train set...")
     train_features, train_labels = extract_features(
-        model, train_dataset, batch_size, num_workers, gather_on_cpu=gather_on_cpu
+        model, None, train_dataset, batch_size, num_workers, gather_on_cpu=gather_on_cpu
     )
     logger.info(f"Train features created, shape {train_features.shape}.")
 
@@ -273,7 +273,7 @@ def eval_knn(
         sampler_size=len(val_dataset),
         drop_last=False,
         shuffle=False,
-        persistent_workers=True,
+        #persistent_workers=True,
         collate_fn=collate_fn
     )
     num_classes = train_labels.max() + 1
@@ -301,6 +301,11 @@ def eval_knn(
 
     # ============ evaluation ... ============
     logger.info("Start the k-NN classification.")
+    # note that this evaluates, for various number of k,
+    # each test example yields a probability over some labels, which is
+    # weighted based on the similarity score to the neighbors
+    # then, topk acc is evaluated for the probability vector over these
+    # neighbors
     _, results_dict = evaluate(model_with_knn, val_dataloader, postprocessors, metrics, device)
 
     # Averaging the results over the n tries for each value of n_per_class
@@ -329,7 +334,7 @@ def fetch_k_neighbors(
     num_workers,
     gather_on_cpu
 ):
-    #model = ModelWithNormalize(model)
+    model = ModelWithNormalize(model)
 
     logger.info("Extracting features for train set...")
     train_features, _ = extract_features(
@@ -370,11 +375,11 @@ def eval_knn_with_model(
     train_dataset,
     val_dataset,
     nb_knn=(10, 20, 100, 200),
-    temperature=0.07,
+    temperature=0.04,
     autocast_dtype=torch.float,
     accuracy_averaging=AccuracyAveraging.MEAN_ACCURACY,
     gather_on_cpu=False,
-    batch_size=256,
+    batch_size=64,
     num_workers=5,
     n_per_class_list=[-1],
     n_tries=1,
@@ -451,13 +456,13 @@ def main(args):
     )
     '''
     train_knn_dataset = ObjaverseEval(split='train', root="/data/ziqi/objaverse/pretrain")
-    val_knn_dataset = ObjaverseEvalSubset(split='test', root="/data/ziqi/objaverse/pretrain", test_subset_idxs = [20,65,100,325,1000])
+    val_knn_dataset = ObjaverseEvalSubset(split='test', root="/data/ziqi/objaverse/pretrain", test_subset_idxs = [20,65,375,500,2000])
     fetch_k_neighbors(
         model,
         dinohead,
         train_knn_dataset,
         val_knn_dataset, # expect test dataset to be small
-        6,
+        20,
         64,
         5,
         gather_on_cpu=args.gather_on_cpu
@@ -469,5 +474,5 @@ if __name__ == "__main__":
     description = "DINOv2 k-NN evaluation"
     args_parser = get_args_parser(description=description)
     args = args_parser.parse_args()
-    args.pretrained_weights = "/data/ziqi/training_checkpts/dinotry/eval/training_5999/teacher_checkpoint.pth"
+    args.pretrained_weights = "/data/ziqi/training_checkpts/debugall/eval/training_1079/teacher_checkpoint.pth"
     sys.exit(main(args))

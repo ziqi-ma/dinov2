@@ -804,7 +804,7 @@ class PointTransformerV3(PointModule):
         qk_scale=None,
         attn_drop=0.0,
         proj_drop=0.0,
-        drop_path=0.3,
+        drop_path=0,#0.3,
         pre_norm=True,
         shuffle_orders=True,
         enable_rpe=False,
@@ -842,15 +842,14 @@ class PointTransformerV3(PointModule):
             bn_layer = partial(
                 PDNorm,
                 norm_layer=partial(
-                    nn.BatchNorm1d, eps=1e-3, momentum=0.01, affine=pdnorm_affine
+                    nn.LayerNorm,elementwise_affine=pdnorm_affine
                 ),
                 conditions=pdnorm_conditions,
                 decouple=pdnorm_decouple,
                 adaptive=pdnorm_adaptive,
             )
         else:
-            bn_layer = partial(nn.BatchNorm1d, eps=1e-3, momentum=0.01, affine=False)
-            #bn_layer = partial(nn.BatchNorm1d, eps=1e-3, momentum=0.01)
+            bn_layer = partial(nn.LayerNorm,elementwise_affine=pdnorm_affine)
         if pdnorm_ln:
             ln_layer = partial(
                 PDNorm,
@@ -919,7 +918,7 @@ class PointTransformerV3(PointModule):
             if len(enc) != 0:
                 self.enc.add(module=enc, name=f"enc{s}")
 
-    def forward(self, data_dict, is_training = False):
+    def get_feats(self, data_dict, is_training):
         """
         A data_dict is a dictionary containing properties of a batched point cloud.
         It should contain the following properties for PTv3:
@@ -945,13 +944,23 @@ class PointTransformerV3(PointModule):
         #  0 ...            0 1...]
         M = torch.nn.functional.normalize(M, p=1, dim=1)#.half()
         pooled_feats = torch.mm(M, unpooled_feats) # B, 512
+        
 
         normed_pooled_feats = self.norm(pooled_feats) # normalize on the 512 dim
         normed_unpooled_feats = self.norm(unpooled_feats) # normalize on the 512 dim
+        return {
+                    "x_norm_clstoken": normed_pooled_feats,
+                    "x_norm_patchtokens": normed_unpooled_feats
+                }
+
+
+    def forward(self, data_dict, is_training = False, include_local=False):
+        global_dict = self.get_feats(data_dict, is_training=is_training)
         if is_training:
-            return {
-                "x_norm_clstoken": normed_pooled_feats,
-                "x_norm_patchtokens": normed_unpooled_feats
-            }
+            if include_local:
+                local_dict = self.get_feats(data_dict["local_crops"], is_training=is_training)
+                global_dict["local_x_norm_clstoken"] = local_dict["x_norm_clstoken"]
+                global_dict["local_x_patchtokens"] = local_dict["x_norm_patchtokens"]
+            return global_dict
         else:
-            return normed_pooled_feats
+            return global_dict["x_norm_clstoken"]

@@ -63,12 +63,12 @@ def evaluate(
     metric_logger = MetricLogger(delimiter="  ")
     header = "Test:"
 
-    for data, *_ in metric_logger.log_every(data_loader, 10, header):
+    for data in metric_logger.log_every(data_loader, 10):
         targets = data["label"].cuda()
         for key in data.keys():
             if isinstance(data[key], torch.Tensor):
                 data[key] = data[key].cuda(non_blocking=True)
-        outputs = model(data).float()
+        outputs = model(data)
 
         if criterion is not None:
             loss = criterion(outputs, targets)
@@ -126,9 +126,9 @@ def extract_features_with_dataloader(model, dinohead, data_loader, sample_count,
             if isinstance(data[key], torch.Tensor):
                 data[key] = data[key].cuda(non_blocking=True)
         features_rank = model(data).float()
-        features_rank = dinohead(features_rank).float()
-        features_rank = F.softmax((features_rank/0.07), dim=-1)
-        features_rank = nn.functional.normalize(features_rank, dim=1, p=2)
+        #features_rank = dinohead(features_rank).float()
+        #features_rank = F.softmax((features_rank/0.07), dim=-1)
+        #features_rank = nn.functional.normalize(features_rank, dim=1, p=2)
 
         # init storage feature matrix
         if features is None:

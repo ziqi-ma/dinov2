@@ -206,9 +206,10 @@ def make_data_loader(
     logger.info("using PyTorch data loader")
     data_loader = torch.utils.data.DataLoader(
         dataset,
-        sampler=sampler,
+        #sampler=sampler,
+        shuffle=shuffle,
         batch_size=batch_size,
-        num_workers=num_workers,
+        #num_workers=num_workers,
         pin_memory=True,
         drop_last=drop_last,
         persistent_workers=persistent_workers,

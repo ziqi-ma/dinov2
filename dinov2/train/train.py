@@ -20,13 +20,20 @@ from dinov2.logging import MetricLogger
 from dinov2.utils.config import setup
 from dinov2.utils.utils import CosineScheduler
 from dinov2.eval.knn import eval_knn_with_model
-from dinov2.data.datasets import ObjaverseAugmented, ObjaverseEval, collate_fn
+from dinov2.data.datasets import ObjaverseAugmented, ObjaverseEval, collate_fn, visualize_data
 from dinov2.train.ssl_meta_arch import SSLMetaArch
 
 
 torch.backends.cuda.matmul.allow_tf32 = True  # PyTorch 1.12 sets this to False by default
 logger = logging.getLogger("dinov2")
 
+def compute_total_grad_norm(model):
+    total_norm = 0.0
+    for param in model.parameters():
+        if param.grad is not None:
+            total_norm += param.grad.norm().item() ** 2
+    total_norm = total_norm ** 0.5
+    return total_norm
 
 def get_args_parser(add_help: bool = True):
     parser = argparse.ArgumentParser("DINOv2 training", add_help=add_help)
@@ -67,7 +74,7 @@ def build_optimizer(cfg, params_groups):
 def build_schedulers(cfg):
     OFFICIAL_EPOCH_LENGTH = cfg.train.OFFICIAL_EPOCH_LENGTH
     lr = dict(
-        base_value=cfg.optim["lr"],
+        base_value=0.000125,#cfg.optim["lr"],
         final_value=cfg.optim["min_lr"],
         total_iters=cfg.optim["epochs"] * OFFICIAL_EPOCH_LENGTH,
         warmup_iters=cfg.optim["warmup_epochs"] * OFFICIAL_EPOCH_LENGTH,
@@ -135,22 +142,22 @@ def do_test(cfg, model, test_loader, teacher_temp, train_knn_dataset, val_knn_da
 
     # TODO: figure out parallelization stuff, this is in the parallelized context
     global_loss_list = []
+    local_loss_list = []
     with torch.no_grad():
         for data in test_loader:
             loss_dict = model.forward_backward(data, teacher_temp=teacher_temp, backward=False)
             global_loss_list.append(loss_dict["dino_global_crops_loss"].item())
-    mean_loss = np.mean(global_loss_list)
-    '''
-    model.teacher.backbone.eval()
+            local_loss_list.append(loss_dict["dino_local_crops_loss"].item())
+    mean_global_loss = np.mean(global_loss_list)
+    mean_local_loss = np.mean(local_loss_list)
+    
     with torch.no_grad():
         knn_res = eval_knn_with_model(model.teacher.backbone, eval_dir, train_knn_dataset, val_knn_dataset)
-    model.teacher.backbone.train()
-    print("----------a------------")
     print(knn_res)
-    '''
-    
-    print(mean_loss)
-    return mean_loss, 0,0#knn_res["(-1,20) Top 1"], knn_res["(-1,20) Top 5"]
+    print(mean_global_loss)
+    print(mean_local_loss)
+
+    return mean_global_loss, mean_local_loss, knn_res["('full', 20) Top 1"], knn_res["('full', 20) Top 5"]
 
 
 
@@ -192,12 +199,12 @@ def do_train(cfg, model, resume=False):
     patch_size = cfg.student.patch_size
 
     # setup data loader
-    train_dataset = ObjaverseAugmented(split='train', root="/data/ziqi/objaverse/pretrain")
-    val_dataset = ObjaverseAugmented(split='test', root="/data/ziqi/objaverse/pretrain")
+    train_dataset = ObjaverseAugmented(n_local_crops=cfg.crops.local_crops_number, split='train', root="/data/ziqi/objaverse/pretrain")
+    val_dataset = ObjaverseAugmented(n_local_crops=cfg.crops.local_crops_number, split='test', root="/data/ziqi/objaverse/pretrain")
     train_knn_dataset = ObjaverseEval(split='train', root="/data/ziqi/objaverse/pretrain")
     val_knn_dataset = ObjaverseEval(split='test', root="/data/ziqi/objaverse/pretrain")
     # sampler_type = SamplerType.INFINITE
-    train_sampler_type = SamplerType.SHARDED_INFINITE
+    train_sampler_type = SamplerType.EPOCH
     val_sampler_type = SamplerType.EPOCH
     train_loader = make_data_loader(
         dataset=train_dataset,
@@ -206,6 +213,7 @@ def do_train(cfg, model, resume=False):
         shuffle=True,
         seed=start_iter,  # TODO: Fix this -- cfg.train.seed
         sampler_type=train_sampler_type,
+        sampler_size = len(train_dataset),
         sampler_advance=0,  # TODO(qas): fix this -- start_iter * cfg.train.batch_size_per_gpu,
         drop_last=True,
         collate_fn=collate_fn,
@@ -214,7 +222,7 @@ def do_train(cfg, model, resume=False):
         dataset=val_dataset,
         batch_size=cfg.train.batch_size_per_gpu,
         num_workers=cfg.train.num_workers,
-        shuffle=True,
+        shuffle=False,
         seed=start_iter,  # TODO: Fix this -- cfg.train.seed
         sampler_type=val_sampler_type,
         sampler_size = len(val_dataset),
@@ -232,88 +240,129 @@ def do_train(cfg, model, resume=False):
     metric_logger = MetricLogger(delimiter="  ", output_file=metrics_file)
     header = "Training"
 
-    for data in metric_logger.log_every(
-        train_loader,
-        50,
-        header,
-        max_iter,
-        start_iter,
-    ):
-        current_batch_size = data["offset"].shape[0] / 2
-        if iteration > max_iter:
-            return
+    prev_loss = 10
 
-        # apply schedules
+    for epoch in range(40):
+        print(f"epoch {epoch}")
+        for data in train_loader:
+            #visualize_data(data, [1,65,2,66,3,67])
+            #visualize_data(data["local_crops"], [1,2,3,27,28,29])
+            print(data["path"])
+            current_batch_size = data["offset"].shape[0] / 2
+            if iteration > max_iter:
+                return
 
-        lr = lr_schedule[iteration]
-        wd = wd_schedule[iteration]
-        mom = momentum_schedule[iteration]
-        teacher_temp = teacher_temp_schedule[iteration]
-        last_layer_lr = last_layer_lr_schedule[iteration]
-        apply_optim_scheduler(optimizer, lr, wd, last_layer_lr)
+            # apply schedules
 
-        # compute losses
+            lr = lr_schedule[iteration]
+            wd = wd_schedule[iteration]
+            mom = momentum_schedule[iteration]
+            teacher_temp = teacher_temp_schedule[iteration]
+            last_layer_lr = last_layer_lr_schedule[iteration]
+            apply_optim_scheduler(optimizer, lr, wd, last_layer_lr)
 
-        optimizer.zero_grad(set_to_none=True)
-        loss_dict = model.forward_backward(data, teacher_temp=teacher_temp)
+            # compute losses
 
-        # clip gradients
+            optimizer.zero_grad(set_to_none=True)
+            loss_dict = model.forward_backward(data, teacher_temp=teacher_temp)
 
-        if fp16_scaler is not None:
-            if cfg.optim.clip_grad:
-                fp16_scaler.unscale_(optimizer)
-                for v in model.student.values():
-                    v.clip_grad_norm_(cfg.optim.clip_grad)
-            fp16_scaler.step(optimizer)
-            fp16_scaler.update()
-        else:
-            if cfg.optim.clip_grad:
-                for v in model.student.values():
-                    v.clip_grad_norm_(cfg.optim.clip_grad)
-            optimizer.step()
+            # clip gradients
 
-        # perform teacher EMA update
+            if fp16_scaler is not None:
+                if cfg.optim.clip_grad:
+                    fp16_scaler.unscale_(optimizer)
+                    for v in model.student.values():
+                        v.clip_grad_norm_(cfg.optim.clip_grad)
+                fp16_scaler.step(optimizer)
+                fp16_scaler.update()
+            else:
+                if cfg.optim.clip_grad:
+                    for v in model.student.values():
+                        v.clip_grad_norm_(cfg.optim.clip_grad)
+                optimizer.step()
 
-        model.update_teacher(mom)
+            
+            # perform teacher EMA update
+            model.update_teacher(mom)
+            
 
-        # logging
+            # logging
 
-        if distributed.get_global_size() > 1:
-            for v in loss_dict.values():
-                torch.distributed.all_reduce(v)
-        loss_dict_reduced = {k: v.item() / distributed.get_global_size() for k, v in loss_dict.items()}
+            if distributed.get_global_size() > 1:
+                for v in loss_dict.values():
+                    torch.distributed.all_reduce(v)
+            loss_dict_reduced = {k: v.item() / distributed.get_global_size() for k, v in loss_dict.items()}
 
-        if math.isnan(sum(loss_dict_reduced.values())):
-            logger.info("NaN detected")
-            raise AssertionError
-        losses_reduced = sum(loss for loss in loss_dict_reduced.values())
+            if math.isnan(sum(loss_dict_reduced.values())):
+                logger.info("NaN detected")
+                raise AssertionError
+            losses_reduced = sum(loss for loss in loss_dict_reduced.values())
+            total_grad_norm = compute_total_grad_norm(model)
 
-        metric_logger.update(lr=lr)
-        metric_logger.update(wd=wd)
-        metric_logger.update(mom=mom)
-        metric_logger.update(last_layer_lr=last_layer_lr)
-        metric_logger.update(current_batch_size=current_batch_size)
-        metric_logger.update(total_loss=losses_reduced, **loss_dict_reduced)
-        if iteration % 50 == 0:
+            metric_logger.update(lr=lr)
+            metric_logger.update(wd=wd)
+            metric_logger.update(mom=mom)
+            metric_logger.update(last_layer_lr=last_layer_lr)
+            metric_logger.update(current_batch_size=current_batch_size)
+            metric_logger.update(total_loss=losses_reduced, **loss_dict_reduced)
+
+            # log more for debugging
+            loss_dict_reduced["lr"] = lr
+            loss_dict_reduced["wd"] = wd
+            loss_dict_reduced["mom"] = mom
+            loss_dict_reduced["teacher temp"]=teacher_temp
+            loss_dict_reduced["last layer lr"]=last_layer_lr
+            loss_dict_reduced["total grad norm"]=total_grad_norm
+            
+
+            # DEBUG LOSS SPIKES
+            
+            if losses_reduced > prev_loss * 2:
+                # spikes!
+                print(f"spiking at iteration {iteration}")
+                print(data["path"])
+                # save data
+                net = torch.nn.Linear(2, 2)
+                d = net.state_dict()
+                d.update(data)
+                torch.save(d, f"spikedata5-{iteration}.pth")
+
+            prev_loss = losses_reduced
+
+            # checkpointing and testing
+            
+            if cfg.evaluation.eval_period_iterations > 0 and (iteration + 1) % cfg.evaluation.eval_period_iterations == 0:
+                train_global_loss, train_local_loss, train_knn_top1, train_knn_top5 = do_test(cfg, model, val_loader, teacher_temp, train_knn_dataset, train_knn_dataset, f"training_{iteration}")
+                val_global_loss, val_local_loss, val_knn_top1, val_knn_top5 = do_test(cfg, model, val_loader, teacher_temp, train_knn_dataset, val_knn_dataset, f"training_{iteration}")
+                metric_logger.update(val_global_loss=val_global_loss)
+                metric_logger.update(val_local_loss=val_local_loss)
+                metric_logger.update(knn_top1=val_knn_top1)
+                metric_logger.update(knn_top5=val_knn_top5)
+                torch.cuda.synchronize()
+                loss_dict_reduced["val global loss"] = val_global_loss
+                loss_dict_reduced["val local loss"] = val_local_loss
+                loss_dict_reduced["train knn top 1"] = train_knn_top1
+                loss_dict_reduced["train knn top 5"] = train_knn_top5
+                loss_dict_reduced["val knn top 1"] = val_knn_top1
+                loss_dict_reduced["val knn top 5"] = val_knn_top5
+                
+                eval_losses_dict = {"val global loss":val_global_loss,
+                                    "val local loss": val_local_loss,
+                                    "train knn top 1": train_knn_top1,
+                                    "train knn top 5": train_knn_top5,
+                                    "val knn top 1": val_knn_top1,
+                                    "val knn top 5": val_knn_top5}
+                print(eval_losses_dict)
+            
+
             wandb.log(loss_dict_reduced, step=iteration, commit=True)
+            
+            #periodic_checkpointer.step(iteration)
 
-        # checkpointing and testing
-        
-        if cfg.evaluation.eval_period_iterations > 0 and (iteration + 1) % cfg.evaluation.eval_period_iterations == 0:
-            val_global_loss, knn_top1, knn_top5 = do_test(cfg, model, val_loader, teacher_temp, train_knn_dataset, val_knn_dataset, f"training_{iteration}")
-            metric_logger.update(val_global_loss=val_global_loss)
-            metric_logger.update(knn_top1=knn_top1)
-            metric_logger.update(knn_top5=knn_top5)
-            torch.cuda.synchronize()
-            eval_losses_dict = {"val global loss":val_global_loss,
-                                "knn top 1": knn_top1,
-                                "knn top 5": knn_top5}
-            print(eval_losses_dict)
-            wandb.log(eval_losses_dict, step=iteration, commit=True)
-        
-        periodic_checkpointer.step(iteration)
+            iteration = iteration + 1
 
-        iteration = iteration + 1
+        # perform teacher EMA update, set to prev epoch
+        #model.update_teacher(0)
     metric_logger.synchronize_between_processes()
     return {k: meter.global_avg for k, meter in metric_logger.meters.items()}
 
