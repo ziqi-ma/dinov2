@@ -349,7 +349,6 @@ def fetch_k_neighbors(
 
     # calculate pairwise similarity, this is normalized so we can take cosine sim
     pairwise_similarity = test_features @ train_features.T # this should be n_test by n_train
-    print(pairwise_similarity.shape)
     print(pairwise_similarity)
     print(pairwise_similarity.min())
     print(pairwise_similarity[:5,:100])
@@ -455,14 +454,14 @@ def main(args):
         n_tries=args.n_tries,
     )
     '''
-    train_knn_dataset = ObjaverseEval(split='train', root="/data/ziqi/objaverse/pretrain")
+    train_knn_dataset = ObjaverseEval(split='test', root="/data/ziqi/objaverse/pretrain")
     val_knn_dataset = ObjaverseEvalSubset(split='test', root="/data/ziqi/objaverse/pretrain", test_subset_idxs = [20,65,375,500,2000])
     fetch_k_neighbors(
         model,
         dinohead,
         train_knn_dataset,
         val_knn_dataset, # expect test dataset to be small
-        20,
+        5,
         64,
         5,
         gather_on_cpu=args.gather_on_cpu
@@ -474,5 +473,5 @@ if __name__ == "__main__":
     description = "DINOv2 k-NN evaluation"
     args_parser = get_args_parser(description=description)
     args = args_parser.parse_args()
-    args.pretrained_weights = "/data/ziqi/training_checkpts/debugall/eval/training_1079/teacher_checkpoint.pth"
+    args.pretrained_weights = "/data/ziqi/training_checkpts/lr1e5/eval/training_3999/teacher_checkpoint.pth"
     sys.exit(main(args))

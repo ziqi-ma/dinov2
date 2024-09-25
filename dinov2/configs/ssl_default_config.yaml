@@ -90,12 +90,12 @@ teacher:
   teacher_temp: 0.02 #0.07
   warmup_teacher_temp_epochs: 30
 optim:
-  epochs: 100
+  epochs: 8
   weight_decay: 0.04
   weight_decay_end: 0.4
   base_lr: 0.004  # learning rate for a batch size of 1024
   lr: 0.  # will be set after applying scaling rule
-  warmup_epochs: 10
+  warmup_epochs: 0.5
   min_lr: 1.0e-06
   clip_grad: 3.0
   freeze_last_layer_epochs: 1
@@ -115,4 +115,4 @@ crops:
   global_crops_size: 224
   local_crops_size: 96
 evaluation:
-  eval_period_iterations: 40
+  eval_period_iterations: 100

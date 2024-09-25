@@ -918,7 +918,14 @@ class PointTransformerV3(PointModule):
             if len(enc) != 0:
                 self.enc.add(module=enc, name=f"enc{s}")
 
-    def get_feats(self, data_dict, is_training):
+    def get_embedding(self, data_dict):
+        point = Point(data_dict)
+        point.serialization(order=self.order, shuffle_orders=self.shuffle_orders)
+        point.sparsify()
+        point = self.embedding(point)
+        return point
+
+    def get_feats(self, data_dict):
         """
         A data_dict is a dictionary containing properties of a batched point cloud.
         It should contain the following properties for PTv3:
@@ -942,7 +949,7 @@ class PointTransformerV3(PointModule):
         # [1 1 1.. 1
         #  0 0 ....0 1 1... 1
         #  0 ...            0 1...]
-        M = torch.nn.functional.normalize(M, p=1, dim=1)#.half()
+        M = torch.nn.functional.normalize(M, p=1, dim=1).half()# - weird, for training we need half but for eval float
         pooled_feats = torch.mm(M, unpooled_feats) # B, 512
         
 
@@ -950,15 +957,16 @@ class PointTransformerV3(PointModule):
         normed_unpooled_feats = self.norm(unpooled_feats) # normalize on the 512 dim
         return {
                     "x_norm_clstoken": normed_pooled_feats,
-                    "x_norm_patchtokens": normed_unpooled_feats
+                    "x_norm_patchtokens": normed_unpooled_feats,
+                    "batch_idx": batch_idx
                 }
 
 
     def forward(self, data_dict, is_training = False, include_local=False):
-        global_dict = self.get_feats(data_dict, is_training=is_training)
+        global_dict = self.get_feats(data_dict)
         if is_training:
             if include_local:
-                local_dict = self.get_feats(data_dict["local_crops"], is_training=is_training)
+                local_dict = self.get_feats(data_dict["local_crops"])
                 global_dict["local_x_norm_clstoken"] = local_dict["x_norm_clstoken"]
                 global_dict["local_x_patchtokens"] = local_dict["x_norm_patchtokens"]
             return global_dict

@@ -74,10 +74,10 @@ def build_optimizer(cfg, params_groups):
 def build_schedulers(cfg):
     OFFICIAL_EPOCH_LENGTH = cfg.train.OFFICIAL_EPOCH_LENGTH
     lr = dict(
-        base_value=0.000125,#cfg.optim["lr"],
+        base_value=0.00001,#cfg.optim["lr"],
         final_value=cfg.optim["min_lr"],
         total_iters=cfg.optim["epochs"] * OFFICIAL_EPOCH_LENGTH,
-        warmup_iters=cfg.optim["warmup_epochs"] * OFFICIAL_EPOCH_LENGTH,
+        warmup_iters=int(cfg.optim["warmup_epochs"] * OFFICIAL_EPOCH_LENGTH),
         start_warmup_value=0,
     )
     wd = dict(
@@ -242,12 +242,9 @@ def do_train(cfg, model, resume=False):
 
     prev_loss = 10
 
-    for epoch in range(40):
+    for epoch in range(8):
         print(f"epoch {epoch}")
         for data in train_loader:
-            #visualize_data(data, [1,65,2,66,3,67])
-            #visualize_data(data["local_crops"], [1,2,3,27,28,29])
-            print(data["path"])
             current_batch_size = data["offset"].shape[0] / 2
             if iteration > max_iter:
                 return
@@ -389,5 +386,6 @@ def main(args):
 
 if __name__ == "__main__":
     args = get_args_parser(add_help=True).parse_args()
+    torch.manual_seed(123)
     
     main(args)
