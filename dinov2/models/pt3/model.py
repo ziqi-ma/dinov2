@@ -949,7 +949,7 @@ class PointTransformerV3(PointModule):
         # [1 1 1.. 1
         #  0 0 ....0 1 1... 1
         #  0 ...            0 1...]
-        M = torch.nn.functional.normalize(M, p=1, dim=1).half()# - weird, for training we need half but for eval float
+        M = torch.nn.functional.normalize(M, p=1, dim=1)#.half()# - weird, for training we need half but for eval float
         pooled_feats = torch.mm(M, unpooled_feats) # B, 512
         
 

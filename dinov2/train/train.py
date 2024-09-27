@@ -19,10 +19,10 @@ from dinov2.fsdp import FSDPCheckpointer
 from dinov2.logging import MetricLogger
 from dinov2.utils.config import setup
 from dinov2.utils.utils import CosineScheduler
-from dinov2.eval.knn import eval_knn_with_model
-from dinov2.data.datasets import ObjaverseAugmented, ObjaverseEval, collate_fn, visualize_data
+from dinov2.eval.knn import eval_knn_with_model, fetch_eval_k_neighbors
+from dinov2.data.datasets import ObjaverseAugmented, ObjaverseEval, ObjaverseEvalSubset, collate_fn, visualize_data
 from dinov2.train.ssl_meta_arch import SSLMetaArch
-
+import random
 
 torch.backends.cuda.matmul.allow_tf32 = True  # PyTorch 1.12 sets this to False by default
 logger = logging.getLogger("dinov2")
@@ -74,7 +74,7 @@ def build_optimizer(cfg, params_groups):
 def build_schedulers(cfg):
     OFFICIAL_EPOCH_LENGTH = cfg.train.OFFICIAL_EPOCH_LENGTH
     lr = dict(
-        base_value=0.00001,#cfg.optim["lr"],
+        base_value=0.000001,#cfg.optim["lr"],
         final_value=cfg.optim["min_lr"],
         total_iters=cfg.optim["epochs"] * OFFICIAL_EPOCH_LENGTH,
         warmup_iters=int(cfg.optim["warmup_epochs"] * OFFICIAL_EPOCH_LENGTH),
@@ -105,7 +105,7 @@ def build_schedulers(cfg):
     last_layer_lr_schedule = CosineScheduler(**lr)
 
     last_layer_lr_schedule.schedule[
-        : cfg.optim["freeze_last_layer_epochs"] * OFFICIAL_EPOCH_LENGTH
+        : int(cfg.optim["freeze_last_layer_epochs"] * OFFICIAL_EPOCH_LENGTH)
     ] = 0  # mimicking the original schedules
 
     logger.info("Schedulers ready.")
@@ -128,7 +128,11 @@ def apply_optim_scheduler(optimizer, lr, wd, last_layer_lr):
         param_group["lr"] = (last_layer_lr if is_last_layer else lr) * lr_multiplier
 
 
-def do_test(cfg, model, test_loader, teacher_temp, train_knn_dataset, val_knn_dataset, iteration):
+def do_test(cfg, model, test_loader, teacher_temp, train_knn_dataset_rand,
+            val_knn_dataset_all, val_knn_dataset_picked, val_knn_dataset_rand,
+            train_knn_dataset_rand_rot, val_knn_dataset_all_rot, val_knn_dataset_picked_rot,
+            val_knn_dataset_rand_rot, iteration):
+    
     new_state_dict = model.teacher.state_dict()
     iterstring = str(iteration)
     eval_dir = os.path.join(cfg.train.output_dir, "eval", iterstring)
@@ -152,12 +156,64 @@ def do_test(cfg, model, test_loader, teacher_temp, train_knn_dataset, val_knn_da
     mean_local_loss = np.mean(local_loss_list)
     
     with torch.no_grad():
-        knn_res = eval_knn_with_model(model.teacher.backbone, eval_dir, train_knn_dataset, val_knn_dataset)
-    print(knn_res)
-    print(mean_global_loss)
-    print(mean_local_loss)
+        chamfer_picked, acc_picked = fetch_eval_k_neighbors(
+            model.teacher.backbone,
+            None,
+            val_knn_dataset_all,
+            val_knn_dataset_picked,
+            10,
+            64,
+            5, # num workers
+            gather_on_cpu=args.gather_on_cpu,
+            printout=True
+        )
+        chamfer_picked_rot, acc_picked_rot = fetch_eval_k_neighbors(
+            model.teacher.backbone,
+            None,
+            val_knn_dataset_all_rot,
+            val_knn_dataset_picked_rot, # expect test dataset to be small
+            10,
+            64,
+            5,
+            gather_on_cpu=args.gather_on_cpu,
+            printout=True
+        )
 
-    return mean_global_loss, mean_local_loss, knn_res["('full', 20) Top 1"], knn_res["('full', 20) Top 5"]
+        chamfer_rand, acc_rand = fetch_eval_k_neighbors(
+            model.teacher.backbone,
+            None,
+            train_knn_dataset_rand,
+            val_knn_dataset_rand, # expect test dataset to be small
+            10,
+            64,
+            5,
+            gather_on_cpu=args.gather_on_cpu,
+            printout=False
+        )
+
+        chamfer_rand_rot, acc_rand_rot = fetch_eval_k_neighbors(
+            model.teacher.backbone,
+            None,
+            train_knn_dataset_rand_rot,
+            val_knn_dataset_rand_rot, # expect test dataset to be small
+            10,
+            64,
+            5,
+            gather_on_cpu=args.gather_on_cpu,
+            printout=False
+        )
+    knn_res = {
+        "chamfer_picked":chamfer_picked,
+        "acc_picked":acc_picked,
+        "chamfer_picked_rot":chamfer_picked_rot,
+        "acc_picked_rot":acc_picked_rot,
+        "chamfer_rand":chamfer_rand,
+        "acc_rand":acc_rand,
+        "chamfer_rand_rot":chamfer_rand_rot,
+        "acc_rand_rot":acc_rand_rot
+    }
+
+    return mean_global_loss, mean_local_loss, knn_res
 
 
 
@@ -201,8 +257,16 @@ def do_train(cfg, model, resume=False):
     # setup data loader
     train_dataset = ObjaverseAugmented(n_local_crops=cfg.crops.local_crops_number, split='train', root="/data/ziqi/objaverse/pretrain")
     val_dataset = ObjaverseAugmented(n_local_crops=cfg.crops.local_crops_number, split='test', root="/data/ziqi/objaverse/pretrain")
-    train_knn_dataset = ObjaverseEval(split='train', root="/data/ziqi/objaverse/pretrain")
-    val_knn_dataset = ObjaverseEval(split='test', root="/data/ziqi/objaverse/pretrain")
+    
+    # these are for comprehensive evaluation
+    train_knn_dataset_rand = ObjaverseEvalSubset(split='train', root="/data/ziqi/objaverse/pretrain", test_subset_idxs=range(5000), rotate=False)
+    val_knn_dataset_all = ObjaverseEval(split='test', root="/data/ziqi/objaverse/pretrain", rotate=False)
+    val_knn_dataset_picked = ObjaverseEvalSubset(split='test', root="/data/ziqi/objaverse/pretrain", test_subset_idxs=[], rotate=False)
+    val_knn_dataset_rand = ObjaverseEvalSubset(split='test', root="/data/ziqi/objaverse/pretrain", test_subset_idxs=range(100), rotate=False) # the ordering is random so first 100 suffices
+    train_knn_dataset_rand_rot = ObjaverseEvalSubset(split='train', root="/data/ziqi/objaverse/pretrain", test_subset_idxs=range(5000), rotate=True)
+    val_knn_dataset_all_rot = ObjaverseEval(split='test', root="/data/ziqi/objaverse/pretrain", rotate=True)
+    val_knn_dataset_picked_rot = ObjaverseEvalSubset(split='test', root="/data/ziqi/objaverse/pretrain", test_subset_idxs=[], rotate=True)
+    val_knn_dataset_rand_rot = ObjaverseEvalSubset(split='test', root="/data/ziqi/objaverse/pretrain", test_subset_idxs=range(100), rotate=True)
     # sampler_type = SamplerType.INFINITE
     train_sampler_type = SamplerType.EPOCH
     val_sampler_type = SamplerType.EPOCH
@@ -329,29 +393,30 @@ def do_train(cfg, model, resume=False):
             # checkpointing and testing
             
             if cfg.evaluation.eval_period_iterations > 0 and (iteration + 1) % cfg.evaluation.eval_period_iterations == 0:
-                train_global_loss, train_local_loss, train_knn_top1, train_knn_top5 = do_test(cfg, model, val_loader, teacher_temp, train_knn_dataset, train_knn_dataset, f"training_{iteration}")
-                val_global_loss, val_local_loss, val_knn_top1, val_knn_top5 = do_test(cfg, model, val_loader, teacher_temp, train_knn_dataset, val_knn_dataset, f"training_{iteration}")
+                #train_global_loss, train_local_loss, train_knn_top1, train_knn_top5 = do_test(cfg, model, val_loader, teacher_temp, train_knn_dataset, train_knn_dataset, f"training_{iteration}")
+                val_global_loss, val_local_loss, knn_res = do_test(cfg,
+                                                                   model,
+                                                                   val_loader,
+                                                                   teacher_temp,
+                                                                   train_knn_dataset_rand,
+                                                                   val_knn_dataset_all,
+                                                                   val_knn_dataset_picked,
+                                                                   val_knn_dataset_rand,
+                                                                   train_knn_dataset_rand_rot,
+                                                                   val_knn_dataset_all_rot,
+                                                                   val_knn_dataset_picked_rot,
+                                                                   val_knn_dataset_rand_rot,
+                                                                   f"training_{iteration}")
                 metric_logger.update(val_global_loss=val_global_loss)
                 metric_logger.update(val_local_loss=val_local_loss)
-                metric_logger.update(knn_top1=val_knn_top1)
-                metric_logger.update(knn_top5=val_knn_top5)
                 torch.cuda.synchronize()
+                print(knn_res)
                 loss_dict_reduced["val global loss"] = val_global_loss
                 loss_dict_reduced["val local loss"] = val_local_loss
-                loss_dict_reduced["train knn top 1"] = train_knn_top1
-                loss_dict_reduced["train knn top 5"] = train_knn_top5
-                loss_dict_reduced["val knn top 1"] = val_knn_top1
-                loss_dict_reduced["val knn top 5"] = val_knn_top5
-                
-                eval_losses_dict = {"val global loss":val_global_loss,
-                                    "val local loss": val_local_loss,
-                                    "train knn top 1": train_knn_top1,
-                                    "train knn top 5": train_knn_top5,
-                                    "val knn top 1": val_knn_top1,
-                                    "val knn top 5": val_knn_top5}
-                print(eval_losses_dict)
+                # add to wandb logging
+                for key in knn_res.keys():
+                    loss_dict_reduced[key] = knn_res[key]
             
-
             wandb.log(loss_dict_reduced, step=iteration, commit=True)
             
             #periodic_checkpointer.step(iteration)

@@ -14,7 +14,7 @@ from dinov2.layers import DINOHead
 from dinov2.utils.config import setup
 import torch
 from torch.nn.functional import one_hot, softmax
-
+import open3d as o3d
 import dinov2.distributed as distributed
 from dinov2.data import SamplerType, make_data_loader, make_dataset
 from dinov2.data.transforms import make_classification_eval_transform
@@ -24,6 +24,8 @@ from dinov2.eval.setup import setup_and_build_model
 from dinov2.eval.utils import ModelWithNormalize, evaluate, extract_features
 from dinov2.data.datasets import collate_fn
 from dinov2.data.datasets import ObjaverseEval, ObjaverseEvalSubset
+import numpy as np
+import random
 
 logger = logging.getLogger("dinov2")
 
@@ -324,7 +326,7 @@ def eval_knn(
     return results_dict
 
 
-def fetch_k_neighbors(
+def fetch_eval_k_neighbors(
     model,
     dinohead,
     train_dataset,
@@ -332,7 +334,8 @@ def fetch_k_neighbors(
     nb_knn,
     batch_size,
     num_workers,
-    gather_on_cpu
+    gather_on_cpu,
+    printout=False
 ):
     model = ModelWithNormalize(model)
 
@@ -349,23 +352,52 @@ def fetch_k_neighbors(
 
     # calculate pairwise similarity, this is normalized so we can take cosine sim
     pairwise_similarity = test_features @ train_features.T # this should be n_test by n_train
-    print(pairwise_similarity)
-    print(pairwise_similarity.min())
-    print(pairwise_similarity[:5,:100])
 
     # take top k per test sample
     scores, idxs = torch.topk(pairwise_similarity, nb_knn, dim=1) # expect n_test by nb_knn
+    mean_chamfers = []
+    perc_knn_corr_cat = []
     for i in range(len(test_dataset)):
         test_item = test_dataset[i]
-        print("test sample:")
-        print(test_item["path"])
-        print("train samples neighbors:")
+        cur_pts = test_item["coord"]
+        cur_pcd = o3d.geometry.PointCloud()
+        cur_pcd.points = o3d.utility.Vector3dVector(cur_pts.cpu().numpy())
+        cur_category = "_".join(test_item["path"].split("/")[-1].split("_")[:-1])
+        if printout:
+            print("test sample:")
+            print(test_item["path"])
+            print("train samples neighbors:")
+            print("similarity scores")
+            print(scores[i,:])
+        chamfers = []
+        neighbor_same_category = []
         for j in idxs[i,:]:
-            print(train_dataset[j]["path"])
-        print("similarity scores")
-        print(scores)
-    # TODO check extract_features observes the ordering of the dataset
-    return
+            if train_dataset[j]["path"] == test_item["path"]:
+                continue
+            if printout:
+                print(train_dataset[j]["path"])
+            # also get chamfer distance of the neighbors
+            neighbor_pts = train_dataset[j]["coord"]
+            neighbor_category = "_".join(train_dataset[j]["path"].split("/")[-1].split("_")[:-1])
+            if neighbor_category == cur_category:
+                neighbor_same_category.append(1)
+            else:
+                neighbor_same_category.append(0)
+            # use o3d distance to calculate chamfer dist
+            neighbor_pcd = o3d.geometry.PointCloud()
+            neighbor_pcd.points = o3d.utility.Vector3dVector(neighbor_pts.cpu().numpy())
+            dist1 = np.asarray(cur_pcd.compute_point_cloud_distance(neighbor_pcd)).mean()
+            dist2 = np.asarray(neighbor_pcd.compute_point_cloud_distance(cur_pcd)).mean()
+            chamfer = dist1+dist2
+            chamfers.append(chamfer)
+        perc_neighbor_same_category = np.mean(neighbor_same_category)
+        perc_knn_corr_cat.append(perc_neighbor_same_category)
+        mean_chamfer = np.mean(chamfers)
+        mean_chamfers.append(mean_chamfer)
+    all_mean_chamfer = np.mean(mean_chamfers)
+    all_mean_neighbor_corr_cat = np.mean(perc_knn_corr_cat)
+    print(f"all mean chamfer dist {all_mean_chamfer}, all mean neighbor cat {all_mean_neighbor_corr_cat}")
+    return all_mean_chamfer, all_mean_neighbor_corr_cat
 
 
 def eval_knn_with_model(
@@ -384,7 +416,6 @@ def eval_knn_with_model(
     n_tries=1,
 ):
     #with torch.cuda.amp.autocast(dtype=autocast_dtype):
-    print("gonna eval")
     results_dict_knn = eval_knn(
         model=model,
         train_dataset=train_dataset,
@@ -454,18 +485,69 @@ def main(args):
         n_tries=args.n_tries,
     )
     '''
-    train_knn_dataset = ObjaverseEval(split='test', root="/data/ziqi/objaverse/pretrain")
-    val_knn_dataset = ObjaverseEvalSubset(split='test', root="/data/ziqi/objaverse/pretrain", test_subset_idxs = [20,65,375,500,2000])
-    fetch_k_neighbors(
+
+    train_knn_dataset_rand = ObjaverseEvalSubset(split='train', root="/data/ziqi/objaverse/pretrain", test_subset_idxs=range(5000), rotate=False)
+    val_knn_dataset_all = ObjaverseEval(split='test', root="/data/ziqi/objaverse/pretrain", rotate=False)
+    val_knn_dataset_picked = ObjaverseEvalSubset(split='test', root="/data/ziqi/objaverse/pretrain", test_subset_idxs=[], rotate=False)
+    val_knn_dataset_rand = ObjaverseEvalSubset(split='test', root="/data/ziqi/objaverse/pretrain", test_subset_idxs=range(100), rotate=False) # the ordering is random so first 100 suffices
+    train_knn_dataset_rand_rot = ObjaverseEvalSubset(split='train', root="/data/ziqi/objaverse/pretrain", test_subset_idxs=range(5000), rotate=True)
+    val_knn_dataset_all_rot = ObjaverseEval(split='test', root="/data/ziqi/objaverse/pretrain", rotate=True)
+    val_knn_dataset_picked_rot = ObjaverseEvalSubset(split='test', root="/data/ziqi/objaverse/pretrain", test_subset_idxs=[], rotate=True)
+    val_knn_dataset_rand_rot = ObjaverseEvalSubset(split='test', root="/data/ziqi/objaverse/pretrain", test_subset_idxs=range(100), rotate=True) # the ordering is random
+    
+    chamfer_picked, acc_picked = fetch_eval_k_neighbors(
         model,
         dinohead,
-        train_knn_dataset,
-        val_knn_dataset, # expect test dataset to be small
-        5,
+        val_knn_dataset_all,
+        val_knn_dataset_picked, # expect test dataset to be small
+        10,
         64,
         5,
-        gather_on_cpu=args.gather_on_cpu
+        gather_on_cpu=args.gather_on_cpu,
+        printout=True
     )
+
+    chamfer_picked_rot, acc_picked_rot = fetch_eval_k_neighbors(
+        model,
+        dinohead,
+        val_knn_dataset_all_rot,
+        val_knn_dataset_picked_rot, # expect test dataset to be small
+        10,
+        64,
+        5,
+        gather_on_cpu=args.gather_on_cpu,
+        printout=True
+    )
+
+    chamfer_rand, acc_rand = fetch_eval_k_neighbors(
+        model,
+        dinohead,
+        train_knn_dataset_rand,
+        val_knn_dataset_rand, # expect test dataset to be small
+        10,
+        64,
+        5,
+        gather_on_cpu=args.gather_on_cpu,
+        printout=False
+    )
+
+    chamfer_rand_rot, acc_rand_rot = fetch_eval_k_neighbors(
+        model,
+        dinohead,
+        train_knn_dataset_rand_rot,
+        val_knn_dataset_rand_rot, # expect test dataset to be small
+        10,
+        64,
+        5,
+        gather_on_cpu=args.gather_on_cpu,
+        printout=False
+    )
+
+    print(f"no rotation, picked: chamfer {chamfer_picked}, top10 acc {acc_picked}")
+    print(f"no rotation, rand train 5000 test 100: chamfer {chamfer_rand}, top10 acc {acc_rand}")
+
+    print(f"with rotation, picked: chamfer {chamfer_picked_rot}, top10 acc {acc_picked_rot}")
+    print(f"with rotation, rand train 5000 test 100: chamfer {chamfer_rand_rot}, top10 acc {acc_rand_rot}")
     return 0
 
 
@@ -473,5 +555,11 @@ if __name__ == "__main__":
     description = "DINOv2 k-NN evaluation"
     args_parser = get_args_parser(description=description)
     args = args_parser.parse_args()
-    args.pretrained_weights = "/data/ziqi/training_checkpts/lr1e5/eval/training_3999/teacher_checkpoint.pth"
+    # totry
+    #"/data/ziqi/training_checkpts/debugall/eval/training_1519/teacher_checkpoint.pth" - prev
+    #"/data/ziqi/training_checkpts/decay1e6new/eval/training_1199/teacher_checkpoint.pth" - de1e6_1199
+    #"/data/ziqi/training_checkpts/decay1e6new/eval/training_1599/teacher_checkpoint.pth" - de1e6_1599
+    #"/data/ziqi/training_checkpts/decay1e6new/eval/training_3199/teacher_checkpoint.pth" - de1e6_3199
+    #"/data/ziqi/training_checkpts/1e6new/eval/training_1199/teacher_checkpoint.pth" - new1e6
+    args.pretrained_weights = "/data/ziqi/training_checkpts/1e6new/eval/training_3199/teacher_checkpoint.pth"
     sys.exit(main(args))

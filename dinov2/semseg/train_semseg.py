@@ -231,23 +231,24 @@ def train_semseg_model(args):
                 #log_dict["train miou"]=miou_train
                 log_dict["val loss"]=mloss_val
                 log_dict["val miou"]=miou_val
+                wandb.log({"val loss": mloss_val, "val miou":miou_val}, step=iter, commit=True)
 
             if iter % 50 == 0:
                 wandb.log(log_dict, step=iter, commit=True)
 
-        if epoch % 20 == 0:
-            torch.save({'epoch':epoch,
-                        'model_state_dict':model.state_dict(),
-                        'optimizer_state_dict':opt.state_dict(),
-                        'loss':loss},
-                        f"{args.output_dir}/checkpoint{epoch}.pt")
+            if iter % (iter_per_epoch // 3) == 0:
+                torch.save({'epoch':epoch,
+                            'model_state_dict':model.state_dict(),
+                            'optimizer_state_dict':opt.state_dict(),
+                            'loss':loss},
+                            f"{args.output_dir}/checkpoint{epoch}.pt")
 
 
 if __name__ == "__main__":
     description = "train segmentation model with PT3 encoder and MCC decoder"
     args_parser = get_args_parser(description=description)
     args = args_parser.parse_args()
-    args.pretrained_weights = "/data/ziqi/training_checkpts/debugall/eval/training_1519/teacher_checkpoint.pth"
+    args.pretrained_weights = "/data/ziqi/training_checkpts/1e6new/eval/training_1199/teacher_checkpoint.pth"# this is at least much more rotational invariant #"/data/ziqi/training_checkpts/debugall/eval/training_1519/teacher_checkpoint.pth"
     args.drop_path=0
     args.lr=2e-4
     args.n_epoch=10

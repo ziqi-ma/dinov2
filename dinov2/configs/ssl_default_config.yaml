@@ -65,7 +65,7 @@ train:
   saveckp_freq: 20
   seed: 0
   num_workers: 10
-  OFFICIAL_EPOCH_LENGTH: 506
+  OFFICIAL_EPOCH_LENGTH: 422
   cache_dataset: true
   centering: "centering"
 student:
@@ -87,8 +87,8 @@ teacher:
   momentum_teacher: 0.992
   final_momentum_teacher: 1
   warmup_teacher_temp: 0.04
-  teacher_temp: 0.02 #0.07
-  warmup_teacher_temp_epochs: 30
+  teacher_temp: 0.07 # 0.02
+  warmup_teacher_temp_epochs: 1
 optim:
   epochs: 8
   weight_decay: 0.04
@@ -96,9 +96,9 @@ optim:
   base_lr: 0.004  # learning rate for a batch size of 1024
   lr: 0.  # will be set after applying scaling rule
   warmup_epochs: 0.5
-  min_lr: 1.0e-06
+  min_lr: 1.0e-07
   clip_grad: 3.0
-  freeze_last_layer_epochs: 1
+  freeze_last_layer_epochs: 0.5
   scaling_rule: sqrt_wrt_1024
   patch_embed_lr_mult: 0.2
   layerwise_decay: 0.9
@@ -115,4 +115,4 @@ crops:
   global_crops_size: 224
   local_crops_size: 96
 evaluation:
-  eval_period_iterations: 100
+  eval_period_iterations: 400

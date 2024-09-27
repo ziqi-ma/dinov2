@@ -67,7 +67,7 @@ def global_aug(xyz, rgb, normal):
     data_dict = ChromaticTranslation(p=0.95, ratio=0.05)(data_dict)
     data_dict = ChromaticJitter(p=0.95, std=0.05)(data_dict)
     data_dict = GridSample(grid_size=0.02,hash_type='fnv',mode='train',return_grid_coord=True)(data_dict)
-    data_dict = SphereCrop(sample_rate=0.8, mode='random')(data_dict)
+    #data_dict = SphereCrop(sample_rate=0.8, mode='random')(data_dict)
     #data_dict = SphereCrop(point_max=204800, mode='random')(data_dict)
     data_dict = CenterShift(apply_z=False)(data_dict)
     data_dict = NormalizeColor()(data_dict)
@@ -98,7 +98,7 @@ def local_aug(xyz, rgb, normal):
     data_dict = ChromaticTranslation(p=0.95, ratio=0.05)(data_dict)
     data_dict = ChromaticJitter(p=0.95, std=0.05)(data_dict)
     data_dict = GridSample(grid_size=0.02,hash_type='fnv',mode='train',return_grid_coord=True)(data_dict)
-    data_dict = SphereCrop(sample_rate=0.6, mode='random')(data_dict)
+    #data_dict = SphereCrop(sample_rate=0.6, mode='random')(data_dict)
     #data_dict = SphereCrop(point_max=204800, mode='random')(data_dict)
     data_dict = CenterShift(apply_z=False)(data_dict)
     data_dict = NormalizeColor()(data_dict)
@@ -110,7 +110,7 @@ def local_aug(xyz, rgb, normal):
     return data_dict
 
 
-def prep_points_val(xyz, rgb, normal):
+def prep_points_val(xyz, rgb, normal, rotate=False):
     # xyz, rgb, normal all (n,3) numpy arrays
     # rgb is 0-255
     # first shift coordinate frame since model is trained on depth coordinate
@@ -123,16 +123,14 @@ def prep_points_val(xyz, rgb, normal):
     #data_dict = RandomRotate(angle=[rotx, rotx],axis='x',p=1)(data_dict)
     #data_dict = RandomRotate(angle=[roty, roty],axis='y',p=1)(data_dict)
     # try rotate
-    '''
-    data_dict = RandomRotate(angle=[-1, 1],axis='z',p=1)(data_dict)
-    data_dict = RandomRotate(angle=[-1, 1],axis='x',p=1)(data_dict)
-    data_dict = RandomRotate(angle=[-1, 1],axis='y',p=1)(data_dict)
-    '''
+    if rotate:
+        data_dict = RandomRotate(angle=[-1, 1],axis='z',p=1)(data_dict)
+        data_dict = RandomRotate(angle=[-1, 1],axis='x',p=1)(data_dict)
+        data_dict = RandomRotate(angle=[-1, 1],axis='y',p=1)(data_dict)
 
     data_dict = GridSample(grid_size=0.02,hash_type='fnv',mode='train',return_grid_coord=True)(data_dict) # mode train is used in original code, text will subsample points n times and create many samples out of one sample
     data_dict = CenterShift(apply_z=False)(data_dict)
     data_dict = NormalizeColor()(data_dict)
-    #data_dict = Add(keys_dict=dict(condition='S3DIS'))(data_dict)
     data_dict = ToTensor()(data_dict)
     data_dict = Collect(keys=('coord', 'grid_coord'),
                         offset_keys_dict={"offset":"coord"},
@@ -155,8 +153,8 @@ def prep_points_finetune(xyz, rgb, normal, mask2pt):
     data_dict = RandomFlip(p=0.5)(data_dict)
     data_dict = RandomJitter(sigma=0.005, clip=0.02)(data_dict)
     data_dict = ChromaticAutoContrast(p=0.2,blend_factor=None)(data_dict)
-    data_dict = ChromaticTranslation(p=0.95, ratio=0.15)(data_dict)
-    data_dict = ChromaticJitter(p=0.95, std=0.15)(data_dict)
+    data_dict = ChromaticTranslation(p=0.95, ratio=0.05)(data_dict)
+    data_dict = ChromaticJitter(p=0.95, std=0.05)(data_dict)
     data_dict = GridSample(grid_size=0.02,hash_type='fnv',mode='train',return_grid_coord=True)(data_dict)
     #data_dict = SphereCrop(sample_rate=0.4, mode='random')(data_dict)
     #data_dict = SphereCrop(point_max=204800, mode='random')(data_dict)
@@ -316,8 +314,10 @@ class ObjaverseEval(data.Dataset):
         self,
         *,
         split: str, # train/test
-        root: str
+        root: str,
+        rotate: bool = False
     ) -> None:
+        self.rotate = rotate
         self.dirpath = f"{root}/{split}"
         self.objs = os.listdir(self.dirpath)
         self.label2idx = {}
@@ -334,7 +334,7 @@ class ObjaverseEval(data.Dataset):
         pts_xyz = torch.load(f"{obj_dir}/points.pt")
         normal = torch.load(f"{obj_dir}/normals.pt")
         pts_rgb = torch.load(f"{obj_dir}/rgb.pt")*255 #torch.ones(normal.shape)*127.5
-        point_dict = prep_points_val(pts_xyz, pts_rgb, normal)
+        point_dict = prep_points_val(pts_xyz, pts_rgb, normal, rotate=self.rotate)
         point_dict["label"] = self.label2idx[("_").join(cur_obj.split("_")[:-1])]
         point_dict["index"] = index
         point_dict["path"] = obj_dir
@@ -350,17 +350,26 @@ class ObjaverseEvalSubset(data.Dataset):
         *,
         split: str, # train/test/val
         root: str,
-        test_subset_idxs: list
+        test_subset_idxs: list,
+        rotate: bool = False
     ) -> None:
+        self.rotate = rotate
         self.dirpath = f"{root}/{split}"
-        #self.objs = [os.listdir(self.dirpath)[idx] for idx in test_subset_idxs]
-        self.objs = [
-            "chair_781e14252fd745bab52da09998441f5b",
-            "cone_362cbe01dc734766927b2f4b50547a58",
-            "mug_057ed726c32c4e0d8912d04343e7bf5a",
-            "mushroom_2dd809a046d443a68daf28b50fb994f7",
-            "race_car_3f31920c10a546b3955ba311b9c6ded6"
-        ]
+        if len(test_subset_idxs) == 0:
+            self.objs = [
+                "chair_781e14252fd745bab52da09998441f5b",
+                "cone_362cbe01dc734766927b2f4b50547a58",
+                "mug_057ed726c32c4e0d8912d04343e7bf5a",
+                "mushroom_2dd809a046d443a68daf28b50fb994f7",
+                "race_car_3f31920c10a546b3955ba311b9c6ded6",
+                "snowman_4fcf23297885436daadfedf917a62d19",
+                "fire_extinguisher_8b96ed9d18ee4341b13084658cd64c7e",
+                "watch_4aeba6175a754fc1bdd46e9141cef965",
+                "turtle_3db7dbf96e144a1fa54dacdf8b263679",
+                "skateboard_1cc9dbf0c5c84a6d8d75465c21411cc6"
+            ]
+        else:
+            self.objs = [os.listdir(self.dirpath)[idx] for idx in test_subset_idxs]
         self.label2idx = {}
         i = 0
         for obj in self.objs:
@@ -375,7 +384,7 @@ class ObjaverseEvalSubset(data.Dataset):
         pts_xyz = torch.load(f"{obj_dir}/points.pt")
         normal = torch.load(f"{obj_dir}/normals.pt")
         pts_rgb = torch.load(f"{obj_dir}/rgb.pt")*255
-        point_dict = prep_points_val(pts_xyz, pts_rgb, normal)
+        point_dict = prep_points_val(pts_xyz, pts_rgb, normal, rotate=self.rotate)
         point_dict["label"] = self.label2idx[("_").join(cur_obj.split("_")[:-1])]
         point_dict["index"] = index
         point_dict["path"] = obj_dir

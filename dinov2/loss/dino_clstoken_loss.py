@@ -14,7 +14,7 @@ class DINOLoss(nn.Module):
         self,
         out_dim,
         student_temp=0.1,
-        center_momentum=0.9,
+        center_momentum=0.8 #0.9,
     ):
         super().__init__()
         self.student_temp = student_temp

@@ -199,7 +199,8 @@ class SSLMetaArch(nn.Module):
                 teacher_dino_softmaxed_centered_list = self.dino_loss.softmax_center_teacher(
                     teacher_cls_tokens_after_head, teacher_temp=teacher_temp, update_center=backward # if not training, don't update center
                 ).view(n_global_crops_teacher, -1, *teacher_cls_tokens_after_head.shape[1:])
-                self.dino_loss.update_center(teacher_cls_tokens_after_head)
+                if backward: # only update center if training
+                    self.dino_loss.update_center(teacher_cls_tokens_after_head)
                 '''
                 if do_ibot:
                     masked_teacher_patch_tokens_after_head = masked_teacher_patch_tokens_after_head.unsqueeze(0)
