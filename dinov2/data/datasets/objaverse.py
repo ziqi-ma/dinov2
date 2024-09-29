@@ -11,6 +11,7 @@ from torch.utils.data.dataloader import default_collate
 import os
 import torch
 import open3d as o3d
+import json
 
 # the ultimate data structure is as follows:
 # note that the way to match student and teacher globally (with 2 versions of aug)
@@ -136,6 +137,22 @@ def prep_points_val(xyz, rgb, normal, rotate=False):
                         offset_keys_dict={"offset":"coord"},
                         feat_keys=('color', 'normal'))(data_dict)
     return data_dict
+
+def prep_points_val3d(xyz, rgb, normal, gt):
+    # xyz, rgb, normal all (n,3) numpy arrays
+    # rgb is 0-255
+    # first shift coordinate frame since model is trained on depth coordinate
+    xyz_change_axis = np.concatenate([-xyz[:,0].reshape(-1,1), xyz[:,2].reshape(-1,1), xyz[:,1].reshape(-1,1)], axis=1)
+    data_dict = {"coord": xyz_change_axis, "color": rgb, "normal":normal, "gt":gt}
+    data_dict = CenterShift(apply_z=True)(data_dict)
+    data_dict = GridSample(grid_size=0.02,hash_type='fnv',mode='train',return_grid_coord=True)(data_dict) # mode train is used in original code, text will subsample points n times and create many samples out of one sample
+    data_dict = CenterShift(apply_z=False)(data_dict)
+    data_dict = NormalizeColor()(data_dict)
+    data_dict = ToTensor()(data_dict)
+    data_dict = Collect(keys=('coord', 'grid_coord', "gt"),
+                        feat_keys=('color', 'normal'))(data_dict)
+    return data_dict
+    
 
 def prep_points_finetune(xyz, rgb, normal, mask2pt):
     # xyz, rgb, normal all (n,3) numpy arrays
@@ -487,4 +504,53 @@ class ObjaverseFinetuneIoUEval(data.Dataset): # batch size can only be 1 for thi
         return point_dict
 
     def __len__(self) -> int:
+        return len(self.obj_path_list)
+    
+
+
+class ObjaverseEval3D(data.Dataset):
+    def __init__(self, split):
+        assert split in ["seenclass", "unseen", "shapenetpart"]
+        
+        class_uids = sorted(os.listdir(f"/data/ziqi/objaverse/holdout/{split}"))
+        self.obj_path_list = [f"/data/ziqi/objaverse/holdout/{split}/{class_uid}" for class_uid in class_uids if "delete" not in class_uid] 
+
+        # misc.
+        self.model = AutoModel.from_pretrained("google/siglip-base-patch16-224") # dim 768 #"google/siglip-so400m-patch14-384")
+        self.tokenizer = AutoTokenizer.from_pretrained("google/siglip-base-patch16-224")#"google/siglip-so400m-patch14-384")
+    
+ 
+    def __getitem__(self, item):
+        return_dict = {}
+        file_path = self.obj_path_list[item]
+        classname = file_path.split("/")[-1].split("_")[0]
+        pcd = o3d.io.read_point_cloud(f"{file_path}/points5000.pcd")
+        with open(f"{file_path}/label_map.json") as f:
+            label_dict = json.load(f)
+        ordered_label_list = []
+        for i in range(len(label_dict)):
+            ordered_label_list.append(label_dict[str(i+1)])
+        
+        pts_xyz = torch.tensor(np.asarray(pcd.points)).float()
+        normal = torch.tensor(np.asarray(pcd.normals))
+        pts_rgb = torch.tensor(np.asarray(pcd.colors))
+        gt = torch.tensor(np.load(f"{file_path}/labels.npy"))
+
+        return_dict = prep_points_val3d(pts_xyz, pts_rgb, normal, gt)
+
+        ## encode label
+        inputs = self.tokenizer(ordered_label_list, padding="max_length", return_tensors="pt")
+        with torch.no_grad():
+            text_feat = self.model.get_text_features(**inputs) # n_masks, feat_dim (768)
+        
+        #normalize
+        text_feat = text_feat / (text_feat.norm(dim=-1, keepdim=True) + 1e-12)
+
+        return_dict['label_embeds'] = text_feat # n_cur_mask, dim_feat, need to be padded
+        return_dict['class_name'] = classname
+        return_dict['file_path'] = file_path
+
+        return return_dict
+    
+    def __len__(self):
         return len(self.obj_path_list)

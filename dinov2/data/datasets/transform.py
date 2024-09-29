@@ -18,6 +18,39 @@ import torch
 import copy
 from collections.abc import Sequence, Mapping
 
+
+def rotate_pts(pts, angles, device=None): # list of points as a tensor, N*3
+
+    roll = angles[0].reshape(1)
+    yaw = angles[1].reshape(1)
+    pitch = angles[2].reshape(1)
+
+    tensor_0 = torch.zeros(1).to(device)
+    tensor_1 = torch.ones(1).to(device)
+
+    RX = torch.stack([
+                    torch.stack([tensor_1, tensor_0, tensor_0]),
+                    torch.stack([tensor_0, torch.cos(roll), -torch.sin(roll)]),
+                    torch.stack([tensor_0, torch.sin(roll), torch.cos(roll)])]).reshape(3,3)
+
+    RY = torch.stack([
+                    torch.stack([torch.cos(yaw), tensor_0, torch.sin(yaw)]),
+                    torch.stack([tensor_0, tensor_1, tensor_0]),
+                    torch.stack([-torch.sin(yaw), tensor_0, torch.cos(yaw)])]).reshape(3,3)
+
+    RZ = torch.stack([
+                    torch.stack([torch.cos(pitch), -torch.sin(pitch), tensor_0]),
+                    torch.stack([torch.sin(pitch), torch.cos(pitch), tensor_0]),
+                    torch.stack([tensor_0, tensor_0, tensor_1])]).reshape(3,3)
+
+    R = torch.mm(RZ, RY)
+    R = torch.mm(R, RX)
+    if device == "cuda":
+        R = R.cuda()
+    pts_new = torch.mm(pts, R.T)
+    return pts_new
+
+
 class Collect(object):
     def __init__(self, keys, offset_keys_dict=None, **kwargs):
         """

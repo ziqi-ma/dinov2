@@ -112,7 +112,7 @@ def evaluate_miou(model, objwise_loader, n_epoch, set_name, temperature, visuali
                             pixel2face = pix2face,# 10,H,W
                             n_epoch = n_epoch, # which epoch we are evaluating
                             obj_visualize_idx = j, # which object we are evaluating
-                            prefix = f"pt-{set_name}",
+                            prefix = f"mccfinetune-{set_name}",
                             temperature=temperature
                             )
             j += 1
@@ -221,7 +221,7 @@ def train_semseg_model(args):
             
             if iter % iter_per_epoch == 0:
                 # evaluate miou
-                miou_val = evaluate_miou(model, val_iou_loader, epoch, "val", temperature = torch.exp(model.ln_logit_scale))
+                miou_val = evaluate_miou(model, val_iou_loader, epoch, "val", temperature = torch.exp(model.ln_logit_scale.detach()))
                 mloss_val = evaluate_loss(model, val_loader, criterion)
                 
                 # this takes 10 hours to eval all of train set, too long
@@ -252,7 +252,7 @@ if __name__ == "__main__":
     args.drop_path=0
     args.lr=2e-4
     args.n_epoch=10
-    args.batch_size=9
+    args.batch_size=8
     args.seed = 123
     torch.manual_seed(args.seed)
     train_semseg_model(args)
