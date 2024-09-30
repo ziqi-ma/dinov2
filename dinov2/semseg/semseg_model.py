@@ -18,7 +18,7 @@ import torch.nn.functional as F
 from typing import List, Optional
 from dinov2.models.mcc.mcc_model import MCCDecoderAttention, MCCDecoderBlock, LayerScale, DecodeXYZPosEmbed
 from dinov2.eval.setup import setup_and_build_model
-from dinov2.models.pt3.model import offset2batch
+from dinov2.models.pt3.model import offset2batch, batch2offset
 #from timm.models.vision_transformer import PatchEmbed, Block, Mlp, DropPath
 #from util.pos_embed import get_2d_sincos_pos_embed
 
@@ -157,12 +157,30 @@ class SemSeg(nn.Module):
         encoded_feats_dict = self.encoder_backbone.get_feats(data_dict)
         data_dict["global_feats"] = encoded_feats_dict["x_norm_clstoken"] # this is B*512
         data_dict["patch_feats"] = encoded_feats_dict["x_norm_patchtokens"] # this is total_patches*512, each obj doesn't have the same # of patches
-        data_dict["patch_batch_idx"] = encoded_feats_dict["batch_idx"] # this is 00..011..1...63..63 keeping track which patch is which obj
+        
+        # if obj_cum_idx exists, this means we are in test mode where
+        # multiple points in one grid will result in multiple copies of the data
+        # (i.e. first dict only contains point 0 in every grid, second point 1 in every grid etc.)
+        # in this case patch_batch_idx will map to more than 0-63 since all points are appended together
+        if "obj_cum_idx" in data_dict:
+            # we have 2 options here, one is only keep the first patch features and drop the rest
+            # for each object
+            keep_all = True
+            if not keep_all: # only keep the first
+                # need to remove some of patch_feats too
+                raise NotImplementedError
+            # the other is keep all, and just remap the idxs back to obj idx, i.e. 0-63
+            index_mapping = data_dict["obj_cum_idx"] # e.g. [2 5 7...] where how many subobjs are in one obj, cumulated
+            subobj_offset = batch2offset(data_dict["patch_batch_idx"]) # this is e.g. [35, 90, ...]
+            objlevel_patch_offsets = subobj_offset[index_mapping-1] # this is the obj-level offset e.g. [90, 170, ...], TODO: verify
+            objlevel_patch_batch = offset2batch(objlevel_patch_offsets)
+            data_dict["patch_batch_idx"] = objlevel_patch_batch
+        else:
+            data_dict["patch_batch_idx"] = encoded_feats_dict["batch_idx"] # this is 00..011..1...63..63 keeping track which patch is which obj
 
         # optionally, use point embeddings from backbone
         data_dict["point_embedding"] = self.encoder_backbone.get_embedding(data_dict)["feat"]
 
-        # also keep the point embeddings
         return data_dict
 
     def forward_decoder(self, data_dict):
@@ -170,7 +188,19 @@ class SemSeg(nn.Module):
         global_feats = data_dict["global_feats"] # should be B, 512
         patch_feats = data_dict["patch_feats"] # should be n_patches, 512
         patch_batch_idx = data_dict["patch_batch_idx"] # which patch belongs to which object
-        point_batch_idx = offset2batch(data_dict["offset"]) # which point belongs to which object
+        
+        # if obj_cum_idx exists, this means we are in test mode where
+        # multiple points in one grid will result in multiple copies of the data
+        # (i.e. first dict only contains point 0 in every grid, second point 1 in every grid etc.)
+        # in this case point_batch_idx will map to more than 0-63 since all points are appended together
+        if "obj_cum_idx" in data_dict:
+            index_mapping = data_dict["obj_cum_idx"] # e.g. [2 5 7...] where how many subobjs are in one obj, cumulated
+            subobj_offset = data_dict["offset"] # this is e.g. [3569, 5000, ...]
+            objlevel_point_offsets = subobj_offset[index_mapping-1] # this is the obj-level offset e.g. [5000, 10000, ...], TODO: verify
+            point_batch_idx = offset2batch(objlevel_point_offsets)
+        else:
+            point_batch_idx = offset2batch(data_dict["offset"]) # which point belongs to which object
+
         query_rgbnormal_embedding = data_dict["point_embedding"] # should be n_total_pts, 32
         x = torch.cat([global_feats, patch_feats], dim=0)
         # project them both

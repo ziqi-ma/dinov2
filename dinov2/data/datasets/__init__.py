@@ -5,5 +5,6 @@
 
 from .objaverse import ObjaverseAugmented, ObjaverseEval, ObjaverseEvalSubset, ObjaverseFinetune, ObjaverseFinetuneIoUEval, ObjaverseEval3D, collate_fn, visualize_data
 from .partnete import EvalPartNetE
+from .shapenetpart import EvalShapeNetPart
 from .image_net import ImageNet
 from .image_net_22k import ImageNet22k

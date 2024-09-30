@@ -896,8 +896,8 @@ class GridSample(object):
                         data_part["point2face"] = data_dict["point2face"][idx_part]
                     elif "mask2pt" in data_dict.keys():
                         data_part["mask2pt"] = data_dict["mask2pt"][:,idx_part] # axis1 is points
-                    else:
-                        data_part[key] = data_dict[key]
+                    elif "gt" in data_dict.keys():
+                        data_dict["gt"] = data_dict["gt"][idx_unique]
                     
                 data_part_list.append(data_part)
             return data_part_list

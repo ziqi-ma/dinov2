@@ -138,6 +138,7 @@ def prep_points_val(xyz, rgb, normal, rotate=False):
                         feat_keys=('color', 'normal'))(data_dict)
     return data_dict
 
+
 def prep_points_val3d(xyz, rgb, normal, gt):
     # xyz, rgb, normal all (n,3) numpy arrays
     # rgb is 0-255
@@ -145,13 +146,29 @@ def prep_points_val3d(xyz, rgb, normal, gt):
     xyz_change_axis = np.concatenate([-xyz[:,0].reshape(-1,1), xyz[:,2].reshape(-1,1), xyz[:,1].reshape(-1,1)], axis=1)
     data_dict = {"coord": xyz_change_axis, "color": rgb, "normal":normal, "gt":gt}
     data_dict = CenterShift(apply_z=True)(data_dict)
-    data_dict = GridSample(grid_size=0.02,hash_type='fnv',mode='train',return_grid_coord=True)(data_dict) # mode train is used in original code, text will subsample points n times and create many samples out of one sample
+    data_dict = GridSample(grid_size=0.02,hash_type='fnv',mode='train',return_grid_coord=True)(data_dict)
     data_dict = CenterShift(apply_z=False)(data_dict)
     data_dict = NormalizeColor()(data_dict)
     data_dict = ToTensor()(data_dict)
     data_dict = Collect(keys=('coord', 'grid_coord', "gt"),
                         feat_keys=('color', 'normal'))(data_dict)
     return data_dict
+
+def prep_points_val3d_no_subsample(xyz, rgb, normal, gt):
+    # xyz, rgb, normal all (n,3) numpy arrays
+    # rgb is 0-255
+    # first shift coordinate frame since model is trained on depth coordinate
+    xyz_change_axis = np.concatenate([-xyz[:,0].reshape(-1,1), xyz[:,2].reshape(-1,1), xyz[:,1].reshape(-1,1)], axis=1)
+    data_dict = {"coord": xyz_change_axis, "color": rgb, "normal":normal, "gt":gt}
+    data_dict = CenterShift(apply_z=True)(data_dict)
+    data_dicts = GridSample(grid_size=0.02,hash_type='fnv',mode='test',return_grid_coord=True)(data_dict)
+    for data_dict in data_dicts:
+        data_dict = CenterShift(apply_z=False)(data_dict)
+        data_dict = NormalizeColor()(data_dict)
+        data_dict = ToTensor()(data_dict)
+        data_dict = Collect(keys=('coord', 'grid_coord', "gt"),
+                            feat_keys=('color', 'normal'))(data_dict)
+    return data_dicts
     
 
 def prep_points_finetune(xyz, rgb, normal, mask2pt):
@@ -289,7 +306,33 @@ def collate_fn(batch):
         return batch_new
     else:
         return default_collate(batch)
-
+    
+'''
+def collate_fn_testmode(batch):
+    """
+    for testmode gridsample, each item is a list of dicts rather than a single one
+    because the gridsample will have multiple points per grid, and each become one sample
+    collate function for point cloud which support dict and list,
+    'coord' is necessary to determine 'offset'
+    """
+    if not isinstance(batch, List):
+        raise TypeError(f"{batch.dtype} is not supported.")
+    # first, put all lists into one, but keep track of a cumulative index
+    if isinstance(batch[0], List):
+        cum_idx = 0
+        cum_idx_list = []
+        all_dict_list = []
+        for dict_list in batch:
+            curlen = len(dict_list)
+            all_dict_list += dict_list
+            cum_idx += curlen
+            cum_idx_list.append(cum_idx) # starting idx, starting at len1, ending at sum_i(leni)
+        collated_dict = collate_fn(all_dict_list)
+        collated_dict["obj_cum_idx"] = cum_idx_list
+        return collated_dict
+    else:
+        raise NotImplementedError
+'''
 
 class ObjaverseAugmented(data.Dataset):
     def __init__(
@@ -546,6 +589,8 @@ class ObjaverseEval3D(data.Dataset):
         #normalize
         text_feat = text_feat / (text_feat.norm(dim=-1, keepdim=True) + 1e-12)
 
+        return_dict["xyz_full"] = pts_xyz
+        return_dict["gt_full"] = gt
         return_dict['label_embeds'] = text_feat # n_cur_mask, dim_feat, need to be padded
         return_dict['class_name'] = classname
         return_dict['file_path'] = file_path
