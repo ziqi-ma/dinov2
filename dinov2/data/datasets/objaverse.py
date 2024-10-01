@@ -171,13 +171,13 @@ def prep_points_val3d_no_subsample(xyz, rgb, normal, gt):
     return data_dicts
     
 
-def prep_points_finetune(xyz, rgb, normal, mask2pt):
+def prep_points_finetune(xyz, rgb, normal):
     # xyz, rgb, normal all (n,3) numpy arrays
     # rgb is 0-255
     # first shift coordinate frame since model is trained on depth coordinate
     # x revert, y z shift
     xyz_change_axis = np.concatenate([-xyz[:,0].reshape(-1,1), xyz[:,2].reshape(-1,1), xyz[:,1].reshape(-1,1)], axis=1)
-    data_dict = {"coord": xyz_change_axis, "color": rgb, "normal":normal, "mask2pt": mask2pt}
+    data_dict = {"coord": xyz_change_axis, "color": rgb, "normal":normal}
     data_dict = CenterShift(apply_z=True)(data_dict)
     data_dict = RandomDropout(dropout_ratio=0.2,dropout_application_ratio=1)(data_dict)
     data_dict = RandomRotate(angle=[-1, 1],axis='z',p=1)(data_dict)
@@ -195,20 +195,21 @@ def prep_points_finetune(xyz, rgb, normal, mask2pt):
     data_dict = CenterShift(apply_z=False)(data_dict)
     data_dict = NormalizeColor()(data_dict)
     #data_dict = Add(keys_dict=dict(condition='S3DIS'))(data_dict)
+    data_dict["xyz_full"] = xyz
     data_dict = ToTensor()(data_dict)
-    data_dict = Collect(keys=('coord', 'grid_coord', 'mask2pt'),
-                        offset_keys_dict={"offset":"coord"},
+    data_dict = Collect(keys=('coord', 'grid_coord', 'xyz_full'),
+                        offset_keys_dict={"offset":"coord", "full_offset":"xyz_full"},
                         feat_keys=('color', 'normal'))(data_dict)
     return data_dict
 
 
-def prep_points_finetune_val(xyz, rgb, normal, mask2pt, pt2face):
+def prep_points_finetune_val(xyz, rgb, normal):
     # xyz, rgb, normal all (n,3) numpy arrays
     # rgb is 0-255
     # first shift coordinate frame since model is trained on depth coordinate
     # x revert, y z shift
     xyz_change_axis = np.concatenate([-xyz[:,0].reshape(-1,1), xyz[:,2].reshape(-1,1), xyz[:,1].reshape(-1,1)], axis=1)
-    data_dict = {"coord": xyz_change_axis, "color": rgb, "normal":normal, "mask2pt": mask2pt, 'point2face': pt2face}
+    data_dict = {"coord": xyz_change_axis, "color": rgb, "normal":normal}
     data_dict = CenterShift(apply_z=True)(data_dict)
     '''
     data_dict = RandomRotate(angle=[-1, 1],axis='z',p=1)(data_dict)
@@ -219,8 +220,9 @@ def prep_points_finetune_val(xyz, rgb, normal, mask2pt, pt2face):
     data_dict = CenterShift(apply_z=False)(data_dict)
     data_dict = NormalizeColor()(data_dict)
     data_dict = ToTensor()(data_dict)
-    data_dict = Collect(keys=('coord', 'grid_coord', 'mask2pt', 'point2face'),
-                        offset_keys_dict={"offset":"coord"},
+    data_dict["xyz_full"] = xyz
+    data_dict = Collect(keys=('coord', 'grid_coord', 'xyz_full'),
+                        offset_keys_dict={"offset":"coord", "full_offset":"xyz_full"},
                         feat_keys=('color', 'normal'))(data_dict)
     return data_dict
 
@@ -462,7 +464,7 @@ class ObjaverseFinetune(data.Dataset):
     ) -> None:
         with open(f"/data/ziqi/objaverse/labeled/split/{split}.txt", "r") as f:
             self.obj_path_list = f.read().splitlines()
-        self.model = AutoModel.from_pretrained("google/siglip-base-patch16-224") # dim 768 #"google/siglip-so400m-patch14-384")
+        self.model = AutoModel.from_pretrained("google/siglip-base-patch16-224")#.cuda() # dim 768 #"google/siglip-so400m-patch14-384")
         self.tokenizer = AutoTokenizer.from_pretrained("google/siglip-base-patch16-224")#"google/siglip-so400m-patch14-384")
         
 
@@ -486,16 +488,23 @@ class ObjaverseFinetune(data.Dataset):
             labels = [labels[i] for i in indices]
 
         
-        point_dict = prep_points_finetune(pts_xyz.numpy(), pts_rgb.numpy(), normal.numpy(), mask_pts.numpy())
+        point_dict = prep_points_finetune(pts_xyz.numpy(), pts_rgb.numpy(), normal.numpy())
 
         ## encode label
         inputs = self.tokenizer(labels, padding="max_length", truncation=True, return_tensors="pt")
+        
+        for key in inputs:
+            inputs[key] = inputs[key].cuda()
+        
         with torch.no_grad():
-            text_feat = self.model.get_text_features(**inputs) # n_masks, feat_dim (768)
+            text_feat = self.model.cuda().get_text_features(**inputs) # n_masks, feat_dim (768)
         text_feat = text_feat / (text_feat.norm(dim=-1, keepdim=True) + 1e-12)
-
+        
+        point_dict["mask2pt"] = mask_pts
         point_dict['label_embeds'] = text_feat # n_cur_mask, dim_feat, need to be padded
-        #self.seed += 1
+        point_dict['xyz_full'] = pts_xyz
+        point_dict['rgb_full'] = pts_rgb / 255
+        point_dict['normal_full'] = normal
         return point_dict
 
     def __len__(self) -> int:
@@ -509,8 +518,8 @@ class ObjaverseFinetuneIoUEval(data.Dataset): # batch size can only be 1 for thi
         split: str, # train/test/val
     ) -> None:
         with open(f"/data/ziqi/objaverse/labeled/split/{split}.txt", "r") as f:
-            self.obj_path_list = f.read().splitlines()
-        self.model = AutoModel.from_pretrained("google/siglip-base-patch16-224") # dim 768 #"google/siglip-so400m-patch14-384")
+            self.obj_path_list = f.read().splitlines()[:1000]
+        self.model = AutoModel.from_pretrained("google/siglip-base-patch16-224")#.cuda() # dim 768 #"google/siglip-so400m-patch14-384")
         self.tokenizer = AutoTokenizer.from_pretrained("google/siglip-base-patch16-224")#"google/siglip-so400m-patch14-384")
 
     def __getitem__(self, index: int) -> dict:
@@ -529,21 +538,30 @@ class ObjaverseFinetuneIoUEval(data.Dataset): # batch size can only be 1 for thi
         normal = torch.load(f"/data/ziqi/objaverse/labeled/points/{uid}/normals.pt").cpu()
         pts_rgb = torch.load(f"/data/ziqi/objaverse/labeled/points/{uid}/rgb.pt").cpu()*255
         
-        point_dict = prep_points_finetune_val(pts_xyz.numpy(), pts_rgb.numpy(), normal.numpy(), mask_pts.numpy(), pt2face.numpy())
+        point_dict = prep_points_finetune_val(pts_xyz.numpy(), pts_rgb.numpy(), normal.numpy())
         
         ## encode label
         inputs = self.tokenizer(labels, padding="max_length", truncation=True, return_tensors="pt")
+        
+        for key in inputs:
+            inputs[key] = inputs[key].cuda()
+        
         with torch.no_grad():
-            text_feat = self.model.get_text_features(**inputs) # n_masks, feat_dim (768)
+            text_feat = self.model.cuda().get_text_features(**inputs) # n_masks, feat_dim (768)
         
         #normalize
         text_feat = text_feat / (text_feat.norm(dim=-1, keepdim=True) + 1e-12)
-
+        
+        point_dict["mask2pt"] = mask_pts
+        point_dict["point2face"] = pt2face
         point_dict['label_embeds'] = text_feat # n_cur_mask, dim_feat, need to be padded
         point_dict['masks'] = masks
         point_dict['mask_view_idxs'] = mask_view_idxs
         point_dict['pixel2face'] = pix2face
         point_dict['labels'] = labels
+        point_dict['xyz_full'] = pts_xyz
+        point_dict['rgb_full'] = pts_rgb / 255
+        point_dict['normal_full'] = normal
         return point_dict
 
     def __len__(self) -> int:

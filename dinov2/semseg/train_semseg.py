@@ -129,7 +129,7 @@ def evaluate_loss(model, dataloader, criterion):
                     data[key] = data[key].cuda(non_blocking=True)
             mask_points = data['mask2pt'] 
             mask_embeds = data['label_embeds']
-            pt_offset = data['offset']
+            pt_offset = data['full_offset'] # no grid subsampling
             net_out = model(data) #net_out=[total_pts_batch, dim_feat]    
             loss = criterion(net_out,
                              pt_offset, # offset is tensor of shape B+1, marking starting idx of each obj
@@ -194,15 +194,16 @@ def train_semseg_model(args):
                 param_group["lr"] = lr
 
             for key in data.keys():
-                if isinstance(data[key], torch.Tensor):
+                if isinstance(data[key], torch.Tensor) and "full" not in key:
                     data[key] = data[key].cuda(non_blocking=True)
 
             mask_points = data['mask2pt'] 
             mask_embeds = data['label_embeds']
-            pt_offset = data['offset']
+            pt_offset = data['full_offset'] # no grid subsampling, use full offset
         
             net_out = model(data) #net_out=[total_pts_batch, dim_feat]
             
+            pt_offset = pt_offset.cuda()
             loss = criterion(net_out,
                              pt_offset, # offset is tensor of shape B+1, marking starting idx of each obj
                              mask_embeds,
@@ -219,6 +220,7 @@ def train_semseg_model(args):
             epoch_loss_avg = np.around(np.mean(loss_epoch_current), decimals=4)
             log_dict = {"train loss":epoch_loss_avg, "temperature":np.exp(model.ln_logit_scale.item()), "learning rate": lr}
             
+            
             if iter % iter_per_epoch == 0:
                 # evaluate miou
                 miou_val = evaluate_miou(model, val_iou_loader, epoch, "val", temperature = torch.exp(model.ln_logit_scale.detach()))
@@ -231,17 +233,19 @@ def train_semseg_model(args):
                 #log_dict["train miou"]=miou_train
                 log_dict["val loss"]=mloss_val
                 log_dict["val miou"]=miou_val
-                wandb.log({"val loss": mloss_val, "val miou":miou_val}, step=iter, commit=True)
-
-            if iter % 50 == 0:
+            
+            
+            if iter % 20 == 0 or iter % iter_per_epoch == 0:
                 wandb.log(log_dict, step=iter, commit=True)
 
+            
             if iter % (iter_per_epoch // 3) == 0:
                 torch.save({'epoch':epoch,
                             'model_state_dict':model.state_dict(),
                             'optimizer_state_dict':opt.state_dict(),
                             'loss':loss},
                             f"{args.output_dir}/checkpoint{epoch}.pt")
+            
 
 
 if __name__ == "__main__":
@@ -252,7 +256,7 @@ if __name__ == "__main__":
     args.drop_path=0
     args.lr=2e-4
     args.n_epoch=10
-    args.batch_size=8
+    args.batch_size=6
     args.seed = 123
     torch.manual_seed(args.seed)
     train_semseg_model(args)

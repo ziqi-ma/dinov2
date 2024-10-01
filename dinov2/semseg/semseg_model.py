@@ -72,7 +72,7 @@ class SemSeg(nn.Module):
         # --------------------------------------------------------------------------
         # decoder specifics
         self.decoder_embed = nn.Linear(
-            encoder_embed_dim,
+            encoder_embed_dim + num_pos_embeddings*6,
             decoder_embed_dim,
             bias=True
         ) # this is just a projection from encoded features to decoder feature
@@ -82,8 +82,8 @@ class SemSeg(nn.Module):
             bias=True
         ) # this is just a projection from point embedding from PT3 (32dim) to decoder feature
 
-        self.decoder_feat_embed = nn.Linear(point_embed_dim, decoder_embed_dim - num_pos_embeddings*6)
-        self.decoder_xyz_embed = DecodeXYZPosEmbed(num_pos_embeddings*6)
+        self.decoder_feat_embed = nn.Linear(3+3, decoder_embed_dim) # this 3+3 is rgb+normal
+        #self.decoder_xyz_embed = DecodeXYZPosEmbed(num_pos_embeddings*6)
         #self.decoder_pos_embed = nn.Parameter(torch.zeros(1, n_query_pts, decoder_embed_dim), requires_grad=False)  # fixed sin-cos embedding
 
         self.decoder_blocks = nn.ModuleList([
@@ -124,7 +124,7 @@ class SemSeg(nn.Module):
         self.decoder_pt_embed.apply(self._init_weights)
         self.decoder_blocks.apply(self._init_weights)
         self.decoder_norm.apply(self._init_weights)
-        self.decoder_xyz_embed.apply(self._init_weights)
+        #self.decoder_xyz_embed.apply(self._init_weights)
         self.decoder_feat_embed.apply(self._init_weights)
         self.fc1.apply(self._init_weights)
         self.fc2.apply(self._init_weights)
@@ -157,6 +157,7 @@ class SemSeg(nn.Module):
         encoded_feats_dict = self.encoder_backbone.get_feats(data_dict)
         data_dict["global_feats"] = encoded_feats_dict["x_norm_clstoken"] # this is B*512
         data_dict["patch_feats"] = encoded_feats_dict["x_norm_patchtokens"] # this is total_patches*512, each obj doesn't have the same # of patches
+        data_dict["patch_coord"] = encoded_feats_dict["patch_coord"]
         
         # if obj_cum_idx exists, this means we are in test mode where
         # multiple points in one grid will result in multiple copies of the data
@@ -184,11 +185,21 @@ class SemSeg(nn.Module):
         return data_dict
 
     def forward_decoder(self, data_dict):
+        data_dict["rgb_full"] = data_dict["rgb_full"].cuda()
+        data_dict["normal_full"] = data_dict["normal_full"].cuda()
+        data_dict["xyz_full"] = data_dict["xyz_full"].cuda()
+
 
         global_feats = data_dict["global_feats"] # should be B, 512
         patch_feats = data_dict["patch_feats"] # should be n_patches, 512
         patch_batch_idx = data_dict["patch_batch_idx"] # which patch belongs to which object
-        
+        patch_coord = data_dict["patch_coord"] # coordinates for each patch
+
+        # no grid sampling, so use full offset for points
+        point_batch_idx = offset2batch(data_dict["full_offset"])
+
+        '''
+        these are all if we use grid sampling
         # if obj_cum_idx exists, this means we are in test mode where
         # multiple points in one grid will result in multiple copies of the data
         # (i.e. first dict only contains point 0 in every grid, second point 1 in every grid etc.)
@@ -200,23 +211,24 @@ class SemSeg(nn.Module):
             point_batch_idx = offset2batch(objlevel_point_offsets)
         else:
             point_batch_idx = offset2batch(data_dict["offset"]) # which point belongs to which object
+        '''
 
-        query_rgbnormal_embedding = data_dict["point_embedding"] # should be n_total_pts, 32
+        #query_rgbnormal_embedding = data_dict["point_embedding"] # should be n_total_pts, 32
         x = torch.cat([global_feats, patch_feats], dim=0)
+        # append positional embedding of the patch coords
+        patch_posembedding = sincos_positional_embedding(patch_coord, self.num_pos_embeddings) # n_patches, 32*6=192
+        all_pos_embedding = torch.cat([torch.zeros((global_feats.shape[0],patch_posembedding.shape[1])).cuda(), patch_posembedding], dim=0) # n_patched+B, num_pos_embeddings*6
+        x = torch.cat([x, all_pos_embedding], dim=1) # this is n_patches+B, 512+num_pos_embeddings*6
+
+        query_rgbnormal = torch.cat([data_dict["rgb_full"], data_dict["normal_full"]], dim=1)
+        query_feats_embedding = self.decoder_feat_embed(query_rgbnormal) # n_total_pts, 512
+        query_xyz_posembedding = sincos_positional_embedding(data_dict["xyz_full"], self.num_pos_embeddings) # n_total_pts, 32*6=192
+
+        query_embedding = torch.cat([query_feats_embedding, query_xyz_posembedding], dim=1) # n_total_pts, 512+num_pos_embeddings*6
+        
+        x = torch.cat([x, query_embedding], dim=0)
         # project them both
         x = self.decoder_embed(x) # this should be n_total_patches+B, 512
-        # we cannot add positional embedding since we have variable number of patches
-        #x = x + self.decoder_pos_embed
-        query_xyz_embedding = self.decoder_xyz_embed(data_dict["coord"]) # n_total_pts, 192
-        query_xyz_posembedding = sincos_positional_embedding(data_dict["coord"], self.num_pos_embeddings) # n_total_pts, 32*6=192
-        query_xyz_embedding += query_xyz_posembedding # n_total_pts, 192
-        query_feats_embedding = self.decoder_feat_embed(query_rgbnormal_embedding) # n_total_pts, 512-192
-
-        query_embedding = torch.cat([query_xyz_embedding, query_feats_embedding], dim=1) # n_total_pts, 64
-        #query_embedding = self.decoder_pt_embed(query_embedding)
-        # 3D pos embed, we use PT3 we could also revert back to MCC embedding
-        #unseen_xyz = self.decoder_xyz_pos_embed(unseen_xyz)
-        x = torch.cat([x, query_embedding], dim=0)
 
         # apply Transformer blocks
         for blk in self.decoder_blocks:

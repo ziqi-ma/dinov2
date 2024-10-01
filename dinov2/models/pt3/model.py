@@ -940,6 +940,7 @@ class PointTransformerV3(PointModule):
         point = self.enc(point) #23,512
 
         unpooled_feats = point["feat"] #n_batch_pts, 512
+        patch_coord = point["coord"]
         batch_idx = point["batch"] # in the format of 00..011...1...(b-1)...(b-1)
         # pool per obj
         n_batch_pts = unpooled_feats.shape[0]
@@ -958,6 +959,7 @@ class PointTransformerV3(PointModule):
         return {
                     "x_norm_clstoken": normed_pooled_feats,
                     "x_norm_patchtokens": normed_unpooled_feats,
+                    "patch_coord":patch_coord,
                     "batch_idx": batch_idx
                 }
 
