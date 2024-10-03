@@ -65,7 +65,7 @@ class SemSeg(nn.Module):
         # encoder specifics
         self.encoder_backbone, _, encoder_embed_dim = setup_and_build_model(args)
         # set gradients false for encoder backbone
-        self.freeze_encoder()
+        #self.freeze_encoder()
         self.cached_enc_feat = None
         self.num_pos_embeddings=num_pos_embeddings
 

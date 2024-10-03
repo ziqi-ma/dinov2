@@ -173,7 +173,7 @@ def train_semseg_model(args):
     iter_per_epoch = len(train_data) // args.batch_size
     lr = dict(
         base_value=args.lr,
-        final_value=args.lr/4,
+        final_value=args.lr/10,
         total_iters=args.n_epoch*iter_per_epoch,
         warmup_iters=args.n_epoch*iter_per_epoch // 10,
         start_warmup_value=1e-6,
@@ -254,7 +254,7 @@ if __name__ == "__main__":
     args = args_parser.parse_args()
     args.pretrained_weights = "/data/ziqi/training_checkpts/1e6new/eval/training_1199/teacher_checkpoint.pth"# this is at least much more rotational invariant #"/data/ziqi/training_checkpts/debugall/eval/training_1519/teacher_checkpoint.pth"
     args.drop_path=0
-    args.lr=2e-4
+    args.lr=3e-5
     args.n_epoch=10
     args.batch_size=6
     args.seed = 123

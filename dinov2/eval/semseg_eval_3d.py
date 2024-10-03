@@ -79,7 +79,7 @@ def get_args_parser(
 # so we add 1 after softmax, making it 1,2,...n_parts, n_parts+1 where n_parts+1 corresponds
 # to unlabeled, but when computing IoU we only iterate thru part 1,...n_parts
 # so this works out
-'''
+
 def compute_3d_iou(pred, # n_pts, feat_dim
                    part_text_embeds, # n_parts, feat_dim
                    temperature,
@@ -116,7 +116,7 @@ def compute_3d_iou(pred, # n_pts, feat_dim
             part_ious.append(iou)
     mean_iou = np.mean(part_ious)
     return acc.item(), mean_iou
-'''
+
 
 # we upsample almost always because grid sampling will only keep 1 point per grid
 def compute_3d_iou_upsample(
@@ -281,7 +281,7 @@ def evaluate3d(model, dataloader, category, DISTANCE_CUTOFF=1, N_CHUNKS=1): # ev
     with torch.no_grad():
         for data in dataloader:
             for key in data.keys():
-                if "full" in key:
+                if "full" in key and "gt" not in key:
                     continue
                 if isinstance(data[key], torch.Tensor):
                     data[key] = data[key].cuda(non_blocking=True)
@@ -292,6 +292,12 @@ def evaluate3d(model, dataloader, category, DISTANCE_CUTOFF=1, N_CHUNKS=1): # ev
             gt_subsample = data["gt"]
             gt_full = data["gt_full"]
             xyz_full = data["xyz_full"]
+            acc, iou = compute_3d_iou(
+                net_out, # n_subsampled_pts, feat_dim
+                text_embeds, # n_parts, feat_dim
+                temperature,
+                gt_full) 
+            '''
             iou, acc, iou_sub, acc_sub = compute_3d_iou_upsample(
                 net_out, # n_subsampled_pts, feat_dim
                 text_embeds, # n_parts, feat_dim
@@ -302,15 +308,12 @@ def evaluate3d(model, dataloader, category, DISTANCE_CUTOFF=1, N_CHUNKS=1): # ev
                 gt_full,#n_pts
                 DISTANCE_CUTOFF=DISTANCE_CUTOFF,
                 N_CHUNKS=N_CHUNKS) 
+            '''
             iou_list += [iou]
             acc_list += [acc]
-            sub_iou_list += [iou_sub]
-            sub_acc_list += [acc_sub]
     miou = np.mean(iou_list)
     macc = np.mean(acc_list)
-    subiou = np.mean(sub_iou_list)
-    subacc = np.mean(sub_acc_list)
-    return miou, macc, subiou, subacc
+    return miou, macc#, subiou, subacc
 
 
 def eval_category_partnete(model, category, subset, apply_rotation, DISTANCE_CUTOFF=1):
@@ -381,9 +384,9 @@ def eval_3d_objaverse(model, split, DISTANCE_CUTOFF=1):
                              num_workers=5, 
                              drop_last=False)
     stime = time.time()
-    imiou, imacc, imiousub, imaccsub = evaluate3d(model, test_loader, split, DISTANCE_CUTOFF=DISTANCE_CUTOFF, N_CHUNKS=1)
+    imiou, imacc = evaluate3d(model, test_loader, split, DISTANCE_CUTOFF=DISTANCE_CUTOFF, N_CHUNKS=1)
     etime = time.time()
-    print(f"category {split} miou: {imiou}, sub miou: {imiousub}, time {etime-stime}")
+    print(f"category {split} miou: {imiou}, time {etime-stime}")#, sub miou: {imiousub}, time {etime-stime}")
 
        
 def load_model(checkpt_path):
@@ -420,13 +423,13 @@ if __name__ == '__main__':
     args_parser = get_args_parser(description=description)
     args = args_parser.parse_args()
     args.pretrained_weights = "/data/ziqi/training_checkpts/1e6new/eval/training_1199/teacher_checkpoint.pth"# this is at least much more rotational invariant #"/data/ziqi/training_checkpts/debugall/eval/training_1519/teacher_checkpoint.pth"
-    args.checkpoint_path="/data/ziqi/training_checkpts/dinofinetune3/checkpoint6.pt"
+    args.checkpoint_path="/data/ziqi/training_checkpts/dinofinetune4/checkpoint5.pt"
     args.drop_path=0
     args.seed = 123
     torch.manual_seed(args.seed)
     model = load_model(args.checkpoint_path)
     
-    #eval_3d_objaverse(model, "shapenetpart", DISTANCE_CUTOFF=1) # use label of nearest neighbor
+    eval_3d_objaverse(model, "unseen", DISTANCE_CUTOFF=1) # use label of nearest neighbor
     #eval_partnete_all(subset=True, apply_rotation=True, DISTANCE_CUTOFF=1)
-    eval_shapenetpart_all(subset=False, apply_rotation=True, DISTANCE_CUTOFF=1)
+    #eval_shapenetpart_all(subset=False, apply_rotation=True, DISTANCE_CUTOFF=1)
     

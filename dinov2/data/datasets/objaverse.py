@@ -144,16 +144,18 @@ def prep_points_val3d(xyz, rgb, normal, gt):
     # rgb is 0-255
     # first shift coordinate frame since model is trained on depth coordinate
     xyz_change_axis = np.concatenate([-xyz[:,0].reshape(-1,1), xyz[:,2].reshape(-1,1), xyz[:,1].reshape(-1,1)], axis=1)
-    data_dict = {"coord": xyz_change_axis, "color": rgb, "normal":normal, "gt":gt}
+    data_dict = {"coord": xyz_change_axis, "color": rgb, "normal":normal, "gt":gt, "xyz_full":xyz_change_axis, "rgb_full": rgb, "normal_full":normal, "gt_full":gt}
     data_dict = CenterShift(apply_z=True)(data_dict)
     data_dict = GridSample(grid_size=0.02,hash_type='fnv',mode='train',return_grid_coord=True)(data_dict)
     data_dict = CenterShift(apply_z=False)(data_dict)
     data_dict = NormalizeColor()(data_dict)
     data_dict = ToTensor()(data_dict)
-    data_dict = Collect(keys=('coord', 'grid_coord', "gt"),
+    data_dict = Collect(keys=('coord', 'grid_coord', "gt", "xyz_full", "rgb_full", "normal_full", "gt_full"),
+                        offset_keys_dict={"offset":"coord", "full_offset":"xyz_full"},
                         feat_keys=('color', 'normal'))(data_dict)
     return data_dict
 
+'''
 def prep_points_val3d_no_subsample(xyz, rgb, normal, gt):
     # xyz, rgb, normal all (n,3) numpy arrays
     # rgb is 0-255
@@ -169,15 +171,18 @@ def prep_points_val3d_no_subsample(xyz, rgb, normal, gt):
         data_dict = Collect(keys=('coord', 'grid_coord', "gt"),
                             feat_keys=('color', 'normal'))(data_dict)
     return data_dicts
-    
+'''
 
+# NOTE: all augmentations that can consistently happen to e.g. coord and xyz_full, or color and rgb_full, etc.
+# are applied to both. Some are random, e.g. add a random normal of shape coord, this cannot be done consistently on xyz_full
+# so such augmentations are applied only to the version passed into encoder, these include jitter, chromatic jitter, chromatic auto contrast
 def prep_points_finetune(xyz, rgb, normal):
     # xyz, rgb, normal all (n,3) numpy arrays
     # rgb is 0-255
     # first shift coordinate frame since model is trained on depth coordinate
     # x revert, y z shift
     xyz_change_axis = np.concatenate([-xyz[:,0].reshape(-1,1), xyz[:,2].reshape(-1,1), xyz[:,1].reshape(-1,1)], axis=1)
-    data_dict = {"coord": xyz_change_axis, "color": rgb, "normal":normal}
+    data_dict = {"coord": xyz_change_axis, "color": rgb, "normal":normal, "xyz_full":xyz_change_axis, "rgb_full": rgb, "normal_full":normal}
     data_dict = CenterShift(apply_z=True)(data_dict)
     data_dict = RandomDropout(dropout_ratio=0.2,dropout_application_ratio=1)(data_dict)
     data_dict = RandomRotate(angle=[-1, 1],axis='z',p=1)(data_dict)
@@ -194,10 +199,8 @@ def prep_points_finetune(xyz, rgb, normal):
     #data_dict = SphereCrop(point_max=204800, mode='random')(data_dict)
     data_dict = CenterShift(apply_z=False)(data_dict)
     data_dict = NormalizeColor()(data_dict)
-    #data_dict = Add(keys_dict=dict(condition='S3DIS'))(data_dict)
-    data_dict["xyz_full"] = xyz
     data_dict = ToTensor()(data_dict)
-    data_dict = Collect(keys=('coord', 'grid_coord', 'xyz_full'),
+    data_dict = Collect(keys=('coord', 'grid_coord', 'xyz_full', "rgb_full", "normal_full"),
                         offset_keys_dict={"offset":"coord", "full_offset":"xyz_full"},
                         feat_keys=('color', 'normal'))(data_dict)
     return data_dict
@@ -209,7 +212,7 @@ def prep_points_finetune_val(xyz, rgb, normal):
     # first shift coordinate frame since model is trained on depth coordinate
     # x revert, y z shift
     xyz_change_axis = np.concatenate([-xyz[:,0].reshape(-1,1), xyz[:,2].reshape(-1,1), xyz[:,1].reshape(-1,1)], axis=1)
-    data_dict = {"coord": xyz_change_axis, "color": rgb, "normal":normal}
+    data_dict = {"coord": xyz_change_axis, "color": rgb, "normal":normal, "xyz_full":xyz_change_axis, "rgb_full": rgb, "normal_full":normal}
     data_dict = CenterShift(apply_z=True)(data_dict)
     '''
     data_dict = RandomRotate(angle=[-1, 1],axis='z',p=1)(data_dict)
@@ -220,8 +223,7 @@ def prep_points_finetune_val(xyz, rgb, normal):
     data_dict = CenterShift(apply_z=False)(data_dict)
     data_dict = NormalizeColor()(data_dict)
     data_dict = ToTensor()(data_dict)
-    data_dict["xyz_full"] = xyz
-    data_dict = Collect(keys=('coord', 'grid_coord', 'xyz_full'),
+    data_dict = Collect(keys=('coord', 'grid_coord', 'xyz_full', 'rgb_full', 'normal_full'),
                         offset_keys_dict={"offset":"coord", "full_offset":"xyz_full"},
                         feat_keys=('color', 'normal'))(data_dict)
     return data_dict
@@ -502,9 +504,6 @@ class ObjaverseFinetune(data.Dataset):
         
         point_dict["mask2pt"] = mask_pts
         point_dict['label_embeds'] = text_feat # n_cur_mask, dim_feat, need to be padded
-        point_dict['xyz_full'] = pts_xyz
-        point_dict['rgb_full'] = pts_rgb / 255
-        point_dict['normal_full'] = normal
         return point_dict
 
     def __len__(self) -> int:
@@ -559,9 +558,6 @@ class ObjaverseFinetuneIoUEval(data.Dataset): # batch size can only be 1 for thi
         point_dict['mask_view_idxs'] = mask_view_idxs
         point_dict['pixel2face'] = pix2face
         point_dict['labels'] = labels
-        point_dict['xyz_full'] = pts_xyz
-        point_dict['rgb_full'] = pts_rgb / 255
-        point_dict['normal_full'] = normal
         return point_dict
 
     def __len__(self) -> int:
@@ -593,8 +589,8 @@ class ObjaverseEval3D(data.Dataset):
             ordered_label_list.append(label_dict[str(i+1)])
         
         pts_xyz = torch.tensor(np.asarray(pcd.points)).float()
-        normal = torch.tensor(np.asarray(pcd.normals))
-        pts_rgb = torch.tensor(np.asarray(pcd.colors))
+        normal = torch.tensor(np.asarray(pcd.normals)).float()
+        pts_rgb = torch.tensor(np.asarray(pcd.colors)).float()*255
         gt = torch.tensor(np.load(f"{file_path}/labels.npy"))
 
         return_dict = prep_points_val3d(pts_xyz, pts_rgb, normal, gt)
@@ -607,8 +603,6 @@ class ObjaverseEval3D(data.Dataset):
         #normalize
         text_feat = text_feat / (text_feat.norm(dim=-1, keepdim=True) + 1e-12)
 
-        return_dict["xyz_full"] = pts_xyz
-        return_dict["gt_full"] = gt
         return_dict['label_embeds'] = text_feat # n_cur_mask, dim_feat, need to be padded
         return_dict['class_name'] = classname
         return_dict['file_path'] = file_path

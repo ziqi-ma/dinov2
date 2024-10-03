@@ -137,6 +137,8 @@ class NormalizeColor(object):
     def __call__(self, data_dict):
         if "color" in data_dict.keys():
             data_dict["color"] = data_dict["color"] / 127.5 - 1
+        if "rgb_full" in data_dict.keys():
+            data_dict["rgb_full"] = data_dict["rgb_full"] / 127.5 - 1
         return data_dict
 
 
@@ -174,6 +176,8 @@ class CenterShift(object):
             else:
                 shift = [(x_min + x_max) / 2, (y_min + y_max) / 2, 0]
             data_dict["coord"] -= shift
+            if "xyz_full" in data_dict.keys():
+                data_dict["xyz_full"] -= shift
         return data_dict
 
 
@@ -273,8 +277,17 @@ class RandomRotate(object):
             data_dict["coord"] -= center
             data_dict["coord"] = np.dot(data_dict["coord"], np.transpose(rot_t))
             data_dict["coord"] += center
+        if "xyz_full" in data_dict.keys():
+            data_dict["xyz_full"] -= center
+            data_dict["xyz_full"] = np.dot(data_dict["xyz_full"], np.transpose(rot_t))
+            data_dict["xyz_full"] += center
+
         if "normal" in data_dict.keys():
             data_dict["normal"] = np.dot(data_dict["normal"], np.transpose(rot_t))
+        
+        if "normal_full" in data_dict.keys():
+            data_dict["normal_full"] = np.dot(data_dict["normal_full"], np.transpose(rot_t))
+        
         return data_dict
 
 
@@ -327,6 +340,8 @@ class RandomScale(object):
                 self.scale[0], self.scale[1], 3 if self.anisotropic else 1
             )
             data_dict["coord"] *= scale
+        if "xyz_full" in data_dict.keys():
+            data_dict["xyz_full"] *= scale
         return data_dict
 
 
@@ -338,13 +353,21 @@ class RandomFlip(object):
         if np.random.rand() < self.p:
             if "coord" in data_dict.keys():
                 data_dict["coord"][:, 0] = -data_dict["coord"][:, 0]
+            if "xyz_full" in data_dict.keys():
+                data_dict["xyz_full"][:, 0] = -data_dict["xyz_full"][:, 0]
             if "normal" in data_dict.keys():
                 data_dict["normal"][:, 0] = -data_dict["normal"][:, 0]
+            if "normal_full" in data_dict.keys():
+                data_dict["normal_full"][:, 0] = -data_dict["normal_full"][:, 0]
         if np.random.rand() < self.p:
             if "coord" in data_dict.keys():
                 data_dict["coord"][:, 1] = -data_dict["coord"][:, 1]
+            if "xyz_full" in data_dict.keys():
+                data_dict["xyz_full"][:, 1] = -data_dict["xyz_full"][:, 1]
             if "normal" in data_dict.keys():
                 data_dict["normal"][:, 1] = -data_dict["normal"][:, 1]
+            if "normal_full" in data_dict.keys():
+                data_dict["normal_full"][:, 1] = -data_dict["normal_full"][:, 1]
         return data_dict
 
 
@@ -415,6 +438,8 @@ class ChromaticTranslation(object):
         if "color" in data_dict.keys() and np.random.rand() < self.p:
             tr = (np.random.rand(1, 3) - 0.5) * 255 * 2 * self.ratio
             data_dict["color"][:, :3] = np.clip(tr + data_dict["color"][:, :3], 0, 255)
+            if "rgb_full" in data_dict.keys():
+                data_dict["rgb_full"][:, :3] = np.clip(tr + data_dict["rgb_full"][:, :3], 0, 255)
         return data_dict
 
 
