@@ -59,9 +59,16 @@ def get_autocast_dtype(config):
         return torch.float
 
 
-def build_model_for_eval(config, pretrained_weights):
+def build_model_for_eval(config, pretrained_weights, checkpoint_type="DINO"):
     model, embed_dim = build_model_from_cfg(config, only_teacher=True)
-    dinov2_utils.load_pretrained_weights(model, pretrained_weights, "teacher")
+    if checkpoint_type=="DINO":
+        dinov2_utils.load_pretrained_weights(model, pretrained_weights, "teacher")
+    elif checkpoint_type=="PT3":
+        state_dict = torch.load(pretrained_weights)["model_state_dict"]
+        state_dict = {k.replace("extractor.", ""): v for k, v in state_dict.items()}
+        model.load_state_dict(state_dict, strict=False)
+    else:
+        raise Exception("checkpoint type can only by DINO or PT3")
     model.eval()
     model.cuda()
     return model, embed_dim
@@ -70,6 +77,6 @@ def build_model_for_eval(config, pretrained_weights):
 def setup_and_build_model(args) -> Tuple[Any, torch.dtype]:
     cudnn.benchmark = True
     config = setup(args)
-    model, embed_dim = build_model_for_eval(config, args.pretrained_weights)
+    model, embed_dim = build_model_for_eval(config, args.pretrained_weights, checkpoint_type=args.checkpoint_type)
     autocast_dtype = get_autocast_dtype(config)
     return model, autocast_dtype, embed_dim

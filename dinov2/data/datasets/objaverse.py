@@ -184,13 +184,13 @@ def prep_points_finetune(xyz, rgb, normal):
     xyz_change_axis = np.concatenate([-xyz[:,0].reshape(-1,1), xyz[:,2].reshape(-1,1), xyz[:,1].reshape(-1,1)], axis=1)
     data_dict = {"coord": xyz_change_axis, "color": rgb, "normal":normal, "xyz_full":xyz_change_axis, "rgb_full": rgb, "normal_full":normal}
     data_dict = CenterShift(apply_z=True)(data_dict)
-    data_dict = RandomDropout(dropout_ratio=0.2,dropout_application_ratio=1)(data_dict)
+    #data_dict = RandomDropout(dropout_ratio=0.2,dropout_application_ratio=1)(data_dict)
     data_dict = RandomRotate(angle=[-1, 1],axis='z',p=1)(data_dict)
     data_dict = RandomRotate(angle=[-1, 1],axis='x',p=1)(data_dict)
     data_dict = RandomRotate(angle=[-1, 1],axis='y',p=1)(data_dict)
-    data_dict = RandomScale(scale=[0.9, 1.1])(data_dict)
-    data_dict = RandomFlip(p=0.5)(data_dict)
-    data_dict = RandomJitter(sigma=0.005, clip=0.02)(data_dict)
+    #data_dict = RandomScale(scale=[0.9, 1.1])(data_dict)
+    #data_dict = RandomFlip(p=0.5)(data_dict)
+    #data_dict = RandomJitter(sigma=0.005, clip=0.02)(data_dict)
     data_dict = ChromaticAutoContrast(p=0.2,blend_factor=None)(data_dict)
     data_dict = ChromaticTranslation(p=0.95, ratio=0.05)(data_dict)
     data_dict = ChromaticJitter(p=0.95, std=0.05)(data_dict)
@@ -214,11 +214,11 @@ def prep_points_finetune_val(xyz, rgb, normal):
     xyz_change_axis = np.concatenate([-xyz[:,0].reshape(-1,1), xyz[:,2].reshape(-1,1), xyz[:,1].reshape(-1,1)], axis=1)
     data_dict = {"coord": xyz_change_axis, "color": rgb, "normal":normal, "xyz_full":xyz_change_axis, "rgb_full": rgb, "normal_full":normal}
     data_dict = CenterShift(apply_z=True)(data_dict)
-    '''
+    
     data_dict = RandomRotate(angle=[-1, 1],axis='z',p=1)(data_dict)
     data_dict = RandomRotate(angle=[-1, 1],axis='x',p=1)(data_dict)
     data_dict = RandomRotate(angle=[-1, 1],axis='y',p=1)(data_dict)
-    '''
+    
     data_dict = GridSample(grid_size=0.02,hash_type='fnv',mode='train',return_grid_coord=True)(data_dict)
     data_dict = CenterShift(apply_z=False)(data_dict)
     data_dict = NormalizeColor()(data_dict)
@@ -465,7 +465,7 @@ class ObjaverseFinetune(data.Dataset):
         split: str, # train/test/val
     ) -> None:
         with open(f"/data/ziqi/objaverse/labeled/split/{split}.txt", "r") as f:
-            self.obj_path_list = f.read().splitlines()
+            self.obj_path_list = f.read().splitlines()[:1]
         self.model = AutoModel.from_pretrained("google/siglip-base-patch16-224")#.cuda() # dim 768 #"google/siglip-so400m-patch14-384")
         self.tokenizer = AutoTokenizer.from_pretrained("google/siglip-base-patch16-224")#"google/siglip-so400m-patch14-384")
         
@@ -476,6 +476,7 @@ class ObjaverseFinetune(data.Dataset):
         uid = name_uid.split("_")[-1]
         with open(f"{file_path}/masks/merged/mask_labels.txt", "r") as f:
             labels = f.read().splitlines()
+
         mask_pts = torch.load(f"{file_path}/masks/merged/mask2points.pt").cpu()
         pts_xyz = torch.load(f"/data/ziqi/objaverse/labeled/points/{uid}/points.pt").cpu()
         normal = torch.load(f"/data/ziqi/objaverse/labeled/points/{uid}/normals.pt").cpu()
@@ -517,7 +518,7 @@ class ObjaverseFinetuneIoUEval(data.Dataset): # batch size can only be 1 for thi
         split: str, # train/test/val
     ) -> None:
         with open(f"/data/ziqi/objaverse/labeled/split/{split}.txt", "r") as f:
-            self.obj_path_list = f.read().splitlines()[:1000]
+            self.obj_path_list = f.read().splitlines()[:1]#[:1000]
         self.model = AutoModel.from_pretrained("google/siglip-base-patch16-224")#.cuda() # dim 768 #"google/siglip-so400m-patch14-384")
         self.tokenizer = AutoTokenizer.from_pretrained("google/siglip-base-patch16-224")#"google/siglip-so400m-patch14-384")
 

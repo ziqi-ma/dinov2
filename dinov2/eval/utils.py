@@ -14,9 +14,27 @@ from dinov2.data import DatasetWithEnumeratedTargets, SamplerType, make_data_loa
 import dinov2.distributed as distributed
 from dinov2.logging import MetricLogger
 from dinov2.data.datasets import collate_fn
+import open3d as o3d
 
 logger = logging.getLogger("dinov2")
 
+
+def visualize_pts(pts, labels): # pts is n*3, colors is n, 0 - n-1 where 0 is unlabeled
+    part_num = labels.max()
+    cmap_matrix = torch.tensor([[1,1,1], [1,0,0], [0,1,0], [0,0,1], [1,1,0], [1,0,1],
+                [0,1,1], [0.5,0.5,0.5], [0.5,0.5,0], [0.5,0,0.5],[0,0.5,0.5],
+                [0.1,0.2,0.3],[0.2,0.5,0.3], [0.6,0.3,0.2], [0.5,0.3,0.5],
+                [0.6,0.7,0.2],[0.5,0.8,0.3]]).cuda()[:part_num+1,:]
+    colors = ["white", "red", "green", "blue", "yellow", "magenta", "cyan","grey", "olive",
+                "purple", "teal", "navy", "darkgreen", "brown", "pinkpurple", "yellowgreen", "limegreen"]
+    caption_list=[f"{i}:{colors[i]}" for i in range(part_num+1)]
+    onehot = F.one_hot(labels.long(), num_classes=part_num+1) * 1.0 # n_pts, part_num+1, each row 00.010.0, first place is unlabeled (0 originally)
+    pts_rgb = torch.matmul(onehot, cmap_matrix) # n_pts,3
+    pcd = o3d.geometry.PointCloud()
+    pcd.points = o3d.utility.Vector3dVector(pts.cpu().numpy())
+    pcd.colors = o3d.utility.Vector3dVector(pts_rgb.cpu().numpy())
+    o3d.visualization.draw_plotly([pcd])
+    print(caption_list)
 
 class ModelWithNormalize(torch.nn.Module):
     def __init__(self, model):

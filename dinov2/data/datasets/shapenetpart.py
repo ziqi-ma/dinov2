@@ -122,6 +122,7 @@ class EvalShapeNetPart(data.Dataset):
 
         if self.apply_rotation:
             pts_xyz = rotate_pts(pts_xyz, rot)
+            normal = rotate_pts(normal, rot)
         
         return_dict = prep_points_val3d(pts_xyz, pts_rgb, normal, gt)
 

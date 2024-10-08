@@ -10,18 +10,20 @@ import open3d as o3d
 import json
 
 
-def prep_points_val3d(xyz, rgb, normal, gt):
+def prep_points_val3d(xyz, rgb, normal, gt, xyz_full, rgb_full, normal_full, gt_full):
     # xyz, rgb, normal all (n,3) numpy arrays
     # rgb is 0-255
     # first shift coordinate frame since model is trained on depth coordinate
     xyz_change_axis = np.concatenate([-xyz[:,0].reshape(-1,1), xyz[:,2].reshape(-1,1), xyz[:,1].reshape(-1,1)], axis=1)
-    data_dict = {"coord": xyz_change_axis, "color": rgb, "normal":normal, "gt":gt}
+    xyz_full_change_axis = np.concatenate([-xyz_full[:,0].reshape(-1,1), xyz_full[:,2].reshape(-1,1), xyz_full[:,1].reshape(-1,1)], axis=1)
+    data_dict = {"coord": xyz_change_axis, "color": rgb, "normal":normal, "gt":gt, "xyz_full":xyz_full_change_axis, "rgb_full": rgb_full, "normal_full":normal_full, "gt_full":gt_full}
     data_dict = CenterShift(apply_z=True)(data_dict)
-    data_dict = GridSample(grid_size=0.02,hash_type='fnv',mode='train',return_grid_coord=True)(data_dict) # mode train is used in original code, text will subsample points n times and create many samples out of one sample
+    data_dict = GridSample(grid_size=0.02,hash_type='fnv',mode='train',return_grid_coord=True)(data_dict)
     data_dict = CenterShift(apply_z=False)(data_dict)
     data_dict = NormalizeColor()(data_dict)
     data_dict = ToTensor()(data_dict)
-    data_dict = Collect(keys=('coord', 'grid_coord', "gt"),
+    data_dict = Collect(keys=('coord', 'grid_coord', "gt", "xyz_full", "rgb_full", "normal_full", "gt_full"),
+                        offset_keys_dict={"offset":"coord", "full_offset":"xyz_full"},
                         feat_keys=('color', 'normal'))(data_dict)
     return data_dict
 
@@ -62,14 +64,15 @@ class EvalPartNetE(data.Dataset):
         rot = torch.load(f"{file_path}/rand_rotation.pt")
         
         pts_xyz = torch.tensor(np.asarray(pcd.points)).float()
-        pts_rgb = torch.tensor(np.asarray(pcd.colors))
+        pts_rgb = torch.tensor(np.asarray(pcd.colors)).float()
         pcd.estimate_normals(search_param=o3d.geometry.KDTreeSearchParamHybrid(radius=0.1, max_nn=30))
-        normal = torch.tensor(np.asarray(pcd.normals))
-
-        # subsample 5000 pts
+        normal = torch.tensor(np.asarray(pcd.normals)).float()
+        
         if self.apply_rotation:
             pts_xyz = rotate_pts(pts_xyz, rot)
-        
+            normal = rotate_pts(normal, rot)
+            
+        # subsample 5000 pts
         random_indices = torch.randint(0, pts_xyz.shape[0], (5000,))
         pts_xyz_subsampled = pts_xyz[random_indices]
         pts_rgb_subsampled = pts_rgb[random_indices]
@@ -79,10 +82,10 @@ class EvalPartNetE(data.Dataset):
         gt = torch.tensor(np.load(f"{file_path}/label.npy",allow_pickle=True).item()['semantic_seg'])+1 # we make it agree with objaverse, 0 is unlabeled and 1-k labeled
         gt_subsampled = gt[random_indices]
 
-        return_dict = prep_points_val3d(pts_xyz_subsampled, pts_rgb_subsampled, normal_subsampled, gt_subsampled)
+        #return_dict = prep_points_val3d(pts_xyz_subsampled, pts_rgb_subsampled, normal_subsampled, gt_subsampled, pts_xyz, pts_rgb, normal, gt)
+        # TODO: above goes OOM, won't fix for now since perf wouldn't differ significantly, but if we stick with this method will need to
+        return_dict = prep_points_val3d(pts_xyz_subsampled, pts_rgb_subsampled, normal_subsampled, gt_subsampled, pts_xyz_subsampled, pts_rgb_subsampled, normal_subsampled, gt_subsampled)
 
-        return_dict["xyz_full"] = pts_xyz
-        return_dict["gt_full"] = gt
         return_dict['label_embeds'] = self.text_feat # n_cur_mask, dim_feat, need to be padded
         return_dict['class_name'] = self.category
 

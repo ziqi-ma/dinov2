@@ -63,7 +63,7 @@ def get_args_parser(
     return parser
 
 
-def evaluate_miou(model, objwise_loader, n_epoch, set_name, temperature, visualize_interval=1, visualize_idxs=[20,25,55,80,139]):
+def evaluate_miou(model, objwise_loader, n_epoch, set_name, temperature, visualize_interval=20, visualize_idxs=[0]):#1, visualize_idxs=[20,25,55,80,139]):
     iou_list = []
     j = 0
     with torch.no_grad():
@@ -112,7 +112,7 @@ def evaluate_miou(model, objwise_loader, n_epoch, set_name, temperature, visuali
                             pixel2face = pix2face,# 10,H,W
                             n_epoch = n_epoch, # which epoch we are evaluating
                             obj_visualize_idx = j, # which object we are evaluating
-                            prefix = f"mccfinetune-{set_name}",
+                            prefix = f"mccdebug-{set_name}",
                             temperature=temperature
                             )
             j += 1
@@ -173,7 +173,7 @@ def train_semseg_model(args):
     iter_per_epoch = len(train_data) // args.batch_size
     lr = dict(
         base_value=args.lr,
-        final_value=args.lr/10,
+        final_value=args.min_lr,
         total_iters=args.n_epoch*iter_per_epoch,
         warmup_iters=args.n_epoch*iter_per_epoch // 10,
         start_warmup_value=1e-6,
@@ -220,7 +220,17 @@ def train_semseg_model(args):
             epoch_loss_avg = np.around(np.mean(loss_epoch_current), decimals=4)
             log_dict = {"train loss":epoch_loss_avg, "temperature":np.exp(model.ln_logit_scale.item()), "learning rate": lr}
             
-            
+
+            # debug
+            if iter % (50*iter_per_epoch) == 0:
+                
+                # this takes 10 hours to eval all of train set, too long
+                miou_train = evaluate_miou(model, train_iou_loader, epoch, "train", temperature = torch.exp(model.ln_logit_scale))
+                log_dict["train miou"]=miou_train
+            wandb.log(log_dict, step=iter, commit=True)
+            # end debug
+
+            '''
             if iter % iter_per_epoch == 0:
                 # evaluate miou
                 miou_val = evaluate_miou(model, val_iou_loader, epoch, "val", temperature = torch.exp(model.ln_logit_scale.detach()))
@@ -245,18 +255,23 @@ def train_semseg_model(args):
                             'optimizer_state_dict':opt.state_dict(),
                             'loss':loss},
                             f"{args.output_dir}/checkpoint{epoch}.pt")
-            
+            '''
 
 
 if __name__ == "__main__":
     description = "train segmentation model with PT3 encoder and MCC decoder"
     args_parser = get_args_parser(description=description)
     args = args_parser.parse_args()
-    args.pretrained_weights = "/data/ziqi/training_checkpts/1e6new/eval/training_1199/teacher_checkpoint.pth"# this is at least much more rotational invariant #"/data/ziqi/training_checkpts/debugall/eval/training_1519/teacher_checkpoint.pth"
+    #args.checkpoint_type = "DINO"
+    #args.pretrained_weights = "/data/ziqi/training_checkpts/1e6new/eval/training_1199/teacher_checkpoint.pth"# this is at least much more rotational invariant #"/data/ziqi/training_checkpts/debugall/eval/training_1519/teacher_checkpoint.pth"
+    # try using the PT3-finetuned representation!!
+    args.checkpoint_type = "PT3"
+    args.pretrained_weights = "/data/ziqi/training_checkpts/pt3_scaleup2/ckpt_80.pth"
     args.drop_path=0
-    args.lr=3e-5
-    args.n_epoch=10
-    args.batch_size=6
+    args.lr=6e-5
+    args.min_lr = 0#args.lr/10
+    args.n_epoch=1000#10
+    args.batch_size=1#6
     args.seed = 123
     torch.manual_seed(args.seed)
     train_semseg_model(args)

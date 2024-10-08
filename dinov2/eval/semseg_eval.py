@@ -87,7 +87,7 @@ def viz_pred_mask(pred, # n_pts, feat_dim
                   temperature,
                   threshold=0.6
                   ):
-    i_vals = [1,4,7]
+    i_vals = [2,3,6]
     j_vals = [0,1]
     for i in i_vals:
         for j in j_vals:

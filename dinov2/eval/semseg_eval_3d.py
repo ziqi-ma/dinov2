@@ -17,7 +17,7 @@ import random
 from dinov2.semseg.semseg_model import SemSeg
 from functools import partial
 import open3d as o3d
-
+from dinov2.eval.utils import visualize_pts
 
 def get_args_parser(
     description: Optional[str] = None,
@@ -71,19 +71,16 @@ def get_args_parser(
 # where 0 is unlabeled (note for Shapenetpart and PartnetE we need to +1!)
 # 1,2,...n_parts are actual part labels
 # in this function, to avoid cases where there are only very few part names
-# and all scores are low, we append a 0 in the end before the softmax
+# and all scores are low, we prepend a 0 in the end before the softmax
 # so essentially the prediction softmax score is of shape (n_pts, n_parts+1)
-# where cols 0, ...n_parts-1's correspond to assigning part 1, ... part n_parts
-# and col n_part corresponds to the appended score of 0, i.e. it is only
-# chosen if all parts have negative score, i.e. this point is unlabeled
-# so we add 1 after softmax, making it 1,2,...n_parts, n_parts+1 where n_parts+1 corresponds
-# to unlabeled, but when computing IoU we only iterate thru part 1,...n_parts
-# so this works out
+# where cols 1, ...n_parts's correspond to assigning part 1, ... part n_parts
+# and 0 is unlabeled
 
 def compute_3d_iou(pred, # n_pts, feat_dim
                    part_text_embeds, # n_parts, feat_dim
                    temperature,
-                   label_gt # n_pts
+                   label_gt, # n_pts
+                   xyz_full # just for visuzliation
                    ):
     # the text embedding is normalized to norm 1
     # the pred is not normalized since it's whatever the model outputs
@@ -93,12 +90,13 @@ def compute_3d_iou(pred, # n_pts, feat_dim
     # first get each point's logits
     logits = pred @ part_text_embeds.T # n_pts, n_mask
 
-    # append 0 - in case all scores are very low
-    logits_append0 = torch.cat([logits, torch.zeros(logits.shape[0],1).cuda()],axis=1)
-    pred_softmax = torch.nn.Softmax(dim=1)(logits_append0 * temperature)#[:,:-1]
-    pred_cat = pred_softmax.argmax(dim=1) + 1 # here, 1,...n_part correspond to actual part assignment, n_part+1 corresponds to unlabeled
-
-    #label_gt = label_gt + 1
+    # prepend 0 - corresponds to nothing
+    logits_prepend0 = torch.cat([torch.zeros(logits.shape[0],1).cuda(), logits],axis=1)
+    pred_softmax = torch.nn.Softmax(dim=1)(logits_prepend0 * temperature)
+    pred_cat = pred_softmax.argmax(dim=1) # here, 1,...n_part correspond to actual part assignment, 0 corresponds to unlabeled
+    viz = False
+    if viz:
+        visualize_pts(xyz_full, pred_cat)
     acc = ((pred_cat == label_gt)*1).sum() / pred_cat.shape[0]
 
     pred_np = pred_cat.cpu().numpy()
@@ -106,6 +104,7 @@ def compute_3d_iou(pred, # n_pts, feat_dim
 
     # get per part iou
     part_ious = []
+    
     for part in range(part_text_embeds.shape[0]):
         I = np.sum(np.logical_and(pred_np == part+1, label_np == part+1))
         U = np.sum(np.logical_or(pred_np == part+1, label_np == part+1))
@@ -114,6 +113,7 @@ def compute_3d_iou(pred, # n_pts, feat_dim
         else:
             iou = I / float(U)
             part_ious.append(iou)
+    
     mean_iou = np.mean(part_ious)
     return acc.item(), mean_iou
 
@@ -139,14 +139,14 @@ def compute_3d_iou_upsample(
     logits = pred @ part_text_embeds.T # n_pts, n_mask
 
     # append 0 - in case all scores are very low
-    logits_append0 = torch.cat([logits, torch.zeros(logits.shape[0],1).cuda()],axis=1)
+    logits_append0 = torch.cat([torch.zeros(logits.shape[0],1).cuda(), logits],axis=1)
     pred_softmax = torch.nn.Softmax(dim=1)(logits_append0 * temperature)
 
     # get the acc and iou normally on the subsample first, can remove this later
     sub_miou = 0
     sub_macc = 0
     if True:
-        pred_sub = pred_softmax.argmax(dim=1) + 1 # here, 1,...n_part correspond to actual part assignment, n_part+1 corresponds to unlabeled
+        pred_sub = pred_softmax.argmax(dim=1) # here, 1,...n_part correspond to actual part assignment,0 corresponds to unlabeled
         #label_gt = label_gt + 1
         acc = ((pred_sub == gt_subsample)*1).sum() / pred_sub.shape[0]
         pred_np = pred_sub.cpu().numpy()
@@ -222,7 +222,7 @@ def compute_3d_iou_upsample(
 
     
     # now argmax
-    pred_full = all_probs.argmax(dim=1).cpu() + 1 # here, 1,...n_part correspond to actual part assignment, n_part+1 corresponds to unlabeled
+    pred_full = all_probs.argmax(dim=1).cpu()# here, 1,...n_part correspond to actual part assignment, n_part+1 corresponds to unlabeled
     #label_gt = label_gt + 1
     acc = ((pred_full == gt_full)*1).sum() / pred_full.shape[0]
     pred_np = pred_full.numpy()
@@ -287,16 +287,23 @@ def evaluate3d(model, dataloader, category, DISTANCE_CUTOFF=1, N_CHUNKS=1): # ev
                     data[key] = data[key].cuda(non_blocking=True)
 
             net_out = model(data)
+            
             xyz_sub = data["coord"]
             text_embeds = data['label_embeds']
             gt_subsample = data["gt"]
             gt_full = data["gt_full"]
             xyz_full = data["xyz_full"]
+
+            # just for debugging, visualization
+            viz=False
+            if viz:
+                visualize_pts(xyz_full, gt_full)
             acc, iou = compute_3d_iou(
                 net_out, # n_subsampled_pts, feat_dim
                 text_embeds, # n_parts, feat_dim
                 temperature,
-                gt_full) 
+                gt_full,
+                xyz_full) 
             '''
             iou, acc, iou_sub, acc_sub = compute_3d_iou_upsample(
                 net_out, # n_subsampled_pts, feat_dim
@@ -325,23 +332,20 @@ def eval_category_partnete(model, category, subset, apply_rotation, DISTANCE_CUT
                              num_workers=0, 
                              drop_last=False)
     stime = time.time()
-    imiou, imacc, imiousub, imaccsub = evaluate3d(model, test_loader, category, DISTANCE_CUTOFF=DISTANCE_CUTOFF, N_CHUNKS=3)
+    imiou, imacc = evaluate3d(model, test_loader, category, DISTANCE_CUTOFF=DISTANCE_CUTOFF, N_CHUNKS=3)
     etime = time.time()
-    return imiou, imacc, imiousub, imaccsub, etime-stime
+    return imiou, imacc, etime-stime
 
 def eval_partnete_all(subset, apply_rotation, DISTANCE_CUTOFF=1):
     mious = []
-    submious = []
     alltime = 0
     for category in partnete_categories.keys():
-        miou, _, submiou, _, cat_time = eval_category_partnete(model, category, subset, apply_rotation, DISTANCE_CUTOFF=DISTANCE_CUTOFF)
-        print(f"category {category} miou: {miou}, sub miou: {submiou}, time {cat_time}")
+        miou,  _, cat_time = eval_category_partnete(model, category, subset, apply_rotation, DISTANCE_CUTOFF=DISTANCE_CUTOFF)
+        print(f"category {category} miou: {miou}, time {cat_time}")
         mious.append(miou)
-        submious.append(submiou)
         alltime += cat_time
     mean_iou = np.mean(mious)
-    mean_submious = np.mean(submious)
-    print(f"overall miou {mean_iou}, subsampled {mean_submious}, time {alltime}")
+    print(f"overall miou {mean_iou}, time {alltime}")
     return
 
 
@@ -413,11 +417,9 @@ if __name__ == '__main__':
             "Switch": 52, "Table": 53, "Toaster": 54, "Toilet": 55, "TrashCan": 56, "USB": 57,
             "WashingMachine": 58, "Window": 59, "Door": 60}
     
-    
     shapenetpart_categories = {'airplane': 0, 'bag': 1, 'cap': 2, 'car': 3, 'chair': 4, 
      'earphone': 5, 'guitar': 6, 'knife': 7, 'lamp': 8, 'laptop': 9, 
      'motorbike': 10, 'mug': 11, 'pistol': 12, 'rocket': 13, 'skateboard': 14, 'table': 15}
-    
 
     description = "holdout eval of decoder+encoder for SemSeg3D"
     args_parser = get_args_parser(description=description)
@@ -426,10 +428,11 @@ if __name__ == '__main__':
     args.checkpoint_path="/data/ziqi/training_checkpts/dinofinetune4/checkpoint5.pt"
     args.drop_path=0
     args.seed = 123
+    args.checkpoint_type="DINO"
     torch.manual_seed(args.seed)
     model = load_model(args.checkpoint_path)
     
-    eval_3d_objaverse(model, "unseen", DISTANCE_CUTOFF=1) # use label of nearest neighbor
-    #eval_partnete_all(subset=True, apply_rotation=True, DISTANCE_CUTOFF=1)
+    #eval_3d_objaverse(model, "shapenetpart", DISTANCE_CUTOFF=1) # use label of nearest neighbor
+    eval_partnete_all(subset=False, apply_rotation=True, DISTANCE_CUTOFF=1)
     #eval_shapenetpart_all(subset=False, apply_rotation=True, DISTANCE_CUTOFF=1)
     

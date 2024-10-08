@@ -65,7 +65,7 @@ class SemSeg(nn.Module):
         # encoder specifics
         self.encoder_backbone, _, encoder_embed_dim = setup_and_build_model(args)
         # set gradients false for encoder backbone
-        #self.freeze_encoder()
+        self.freeze_encoder()
         self.cached_enc_feat = None
         self.num_pos_embeddings=num_pos_embeddings
 
@@ -83,7 +83,7 @@ class SemSeg(nn.Module):
         ) # this is just a projection from point embedding from PT3 (32dim) to decoder feature
 
         self.decoder_feat_embed = nn.Linear(3+3, decoder_embed_dim) # this 3+3 is rgb+normal
-        #self.decoder_xyz_embed = DecodeXYZPosEmbed(num_pos_embeddings*6)
+        self.decoder_xyz_embed = DecodeXYZPosEmbed(num_pos_embeddings*6)
         #self.decoder_pos_embed = nn.Parameter(torch.zeros(1, n_query_pts, decoder_embed_dim), requires_grad=False)  # fixed sin-cos embedding
 
         self.decoder_blocks = nn.ModuleList([
@@ -124,7 +124,7 @@ class SemSeg(nn.Module):
         self.decoder_pt_embed.apply(self._init_weights)
         self.decoder_blocks.apply(self._init_weights)
         self.decoder_norm.apply(self._init_weights)
-        #self.decoder_xyz_embed.apply(self._init_weights)
+        self.decoder_xyz_embed.apply(self._init_weights)
         self.decoder_feat_embed.apply(self._init_weights)
         self.fc1.apply(self._init_weights)
         self.fc2.apply(self._init_weights)
@@ -198,6 +198,12 @@ class SemSeg(nn.Module):
         # no grid sampling, so use full offset for points
         point_batch_idx = offset2batch(data_dict["full_offset"])
 
+        # debug
+        DEBUG = False
+        if DEBUG:
+            all_dists = ((data_dict["xyz_full"][0,:]-patch_coord)**2).sum(dim=1)
+            print(torch.sort(all_dists))
+
         '''
         these are all if we use grid sampling
         # if obj_cum_idx exists, this means we are in test mode where
@@ -216,13 +222,18 @@ class SemSeg(nn.Module):
         #query_rgbnormal_embedding = data_dict["point_embedding"] # should be n_total_pts, 32
         x = torch.cat([global_feats, patch_feats], dim=0)
         # append positional embedding of the patch coords
-        patch_posembedding = sincos_positional_embedding(patch_coord, self.num_pos_embeddings) # n_patches, 32*6=192
+        #patch_posembedding = sincos_positional_embedding(patch_coord, self.num_pos_embeddings) # n_patches, 32*6=192
+        # use learned embedding
+        patch_posembedding = self.decoder_xyz_embed(patch_coord)
         all_pos_embedding = torch.cat([torch.zeros((global_feats.shape[0],patch_posembedding.shape[1])).cuda(), patch_posembedding], dim=0) # n_patched+B, num_pos_embeddings*6
         x = torch.cat([x, all_pos_embedding], dim=1) # this is n_patches+B, 512+num_pos_embeddings*6
 
         query_rgbnormal = torch.cat([data_dict["rgb_full"], data_dict["normal_full"]], dim=1)
         query_feats_embedding = self.decoder_feat_embed(query_rgbnormal) # n_total_pts, 512
-        query_xyz_posembedding = sincos_positional_embedding(data_dict["xyz_full"], self.num_pos_embeddings) # n_total_pts, 32*6=192
+
+        #query_xyz_posembedding = sincos_positional_embedding(data_dict["xyz_full"], self.num_pos_embeddings) # n_total_pts, 32*6=192
+        # use learned embedding
+        query_xyz_posembedding = self.decoder_xyz_embed(data_dict["xyz_full"])
 
         query_embedding = torch.cat([query_feats_embedding, query_xyz_posembedding], dim=1) # n_total_pts, 512+num_pos_embeddings*6
         
