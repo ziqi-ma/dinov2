@@ -68,7 +68,7 @@ def global_aug(xyz, rgb, normal):
     data_dict = ChromaticTranslation(p=0.95, ratio=0.05)(data_dict)
     data_dict = ChromaticJitter(p=0.95, std=0.05)(data_dict)
     data_dict = GridSample(grid_size=0.02,hash_type='fnv',mode='train',return_grid_coord=True)(data_dict)
-    #data_dict = SphereCrop(sample_rate=0.8, mode='random')(data_dict)
+    data_dict = SphereCrop(sample_rate=0.9, mode='random')(data_dict)
     #data_dict = SphereCrop(point_max=204800, mode='random')(data_dict)
     data_dict = CenterShift(apply_z=False)(data_dict)
     data_dict = NormalizeColor()(data_dict)
@@ -99,7 +99,7 @@ def local_aug(xyz, rgb, normal):
     data_dict = ChromaticTranslation(p=0.95, ratio=0.05)(data_dict)
     data_dict = ChromaticJitter(p=0.95, std=0.05)(data_dict)
     data_dict = GridSample(grid_size=0.02,hash_type='fnv',mode='train',return_grid_coord=True)(data_dict)
-    #data_dict = SphereCrop(sample_rate=0.6, mode='random')(data_dict)
+    data_dict = SphereCrop(sample_rate=0.7, mode='random')(data_dict)
     #data_dict = SphereCrop(point_max=204800, mode='random')(data_dict)
     data_dict = CenterShift(apply_z=False)(data_dict)
     data_dict = NormalizeColor()(data_dict)
@@ -246,10 +246,11 @@ def visualize_data(data_dict, idx_list):
         curobj_rgb = (data_dict["feat"][idx_start:idx_end,:3]+1)*127.5
         visualize_pts(curobj_coords, curobj_rgb)
 
-def collate_fn(batch):
+def collate_fn_base(batch):
     """
     collate function for point cloud which support dict and list,
     'coord' is necessary to determine 'offset'
+    This is base - it only collates, but does not offset the mask indices
     """
     if not isinstance(batch, Sequence):
         raise TypeError(f"{batch.dtype} is not supported.")
@@ -266,7 +267,7 @@ def collate_fn(batch):
 
     if isinstance(batch[0], Mapping) and "global_aug1" in batch[0] and "global_aug2" in batch[0]:
         global_flattened_batch = [item["global_aug1"] for item in batch] + [item["global_aug2"] for item in batch]
-        global_collated_dict = collate_fn(global_flattened_batch) # this is one dict with each key corresponding to collated global data
+        global_collated_dict = collate_fn_base(global_flattened_batch) # this is one dict with each key corresponding to collated global data
         # add collated local into a key called local_augs
         # NOTE we need every object's crop1 followed by every object's crop2 etc.
         if "local_augs" in batch[0]:
@@ -276,14 +277,14 @@ def collate_fn(batch):
                 for item in batch:
                     local_flattened_batch.append(item["local_augs"][icrop])
             # this is in the order of obj1crop1, ...obj64 crop1, obj1crop2, ...obj64crop2 etc.
-            local_collated_dict = collate_fn(local_flattened_batch)
+            local_collated_dict = collate_fn_base(local_flattened_batch)
             global_collated_dict["local_crops"] = local_collated_dict
         return global_collated_dict
     if isinstance(batch[0], torch.Tensor):
         if len(batch)>1:
-            if batch[0].shape[1:] == batch[1].shape[1:]:
+            try:
                 return torch.cat(list(batch))
-            else:
+            except Exception:
                 return list(batch) # not uniform shape
         else: # only one item, e.g. mask2pt, return itself
             return batch[0]
@@ -293,14 +294,16 @@ def collate_fn(batch):
     elif isinstance(batch[0], Sequence):
         if isinstance(batch[0][0], str):
             return batch
+        if isinstance(batch[0][0], int):
+            return batch
         for data in batch:
             data.append(torch.tensor([data[0].shape[0]]))
-        batch = [collate_fn(samples) for samples in zip(*batch)]
+        batch = [collate_fn_base(samples) for samples in zip(*batch)]
         batch[-1] = torch.cumsum(batch[-1], dim=0).int()
         return batch
     elif isinstance(batch[0], Mapping):
         # if there is mask2pt, always just append as a list
-        batch_new = {key: collate_fn([d[key] for d in batch]) for key in batch[0] if key != "mask2pt"}
+        batch_new = {key: collate_fn_base([d[key] for d in batch]) for key in batch[0] if key != "mask2pt"}
         if "mask2pt" in batch[0]:
             collated_mask2pt =  [d["mask2pt"] for d in batch]
             batch_new["mask2pt"] = collated_mask2pt
@@ -310,6 +313,30 @@ def collate_fn(batch):
         return batch_new
     else:
         return default_collate(batch)
+    
+def collate_fn(batch):
+    """
+    collate function for point cloud which support dict and list,
+    'coord' is necessary to determine 'offset'
+    and also offsets the mask indices
+    """
+    collated_batch = collate_fn_base(batch)
+    if "mask_indices" in collated_batch: # only for training
+        offset = torch.cat([torch.tensor([0]),collated_batch["offset"]]) # should be len 2*bs [0, 2870,.....n]
+        mask_indices = collated_batch["mask_indices"]
+        all_mask_indices = []
+        all_mask_weights = []
+        for i in range(len(mask_indices)):
+            if len(mask_indices[i]) > 0:
+                all_mask_indices.append(torch.tensor(mask_indices[i]) + offset[i])
+                all_mask_weights.append(torch.ones(len(mask_indices[i]))/len(mask_indices[i]))
+        cumu_mask_indices = torch.cat(all_mask_indices)
+        mask_weights = torch.cat(all_mask_weights)
+        collated_batch["mask_indices"] = cumu_mask_indices
+        collated_batch["mask_weights"] = mask_weights
+    return collated_batch
+    
+    
     
 '''
 def collate_fn_testmode(batch):
@@ -344,11 +371,15 @@ class ObjaverseAugmented(data.Dataset):
         *,
         n_local_crops:int,
         split: str, # train/test
-        root: str
+        root: str,
+        mask_perc = 0.2,
+        mask_chunk_size = 10
     ) -> None:
         self.dirpath = f"{root}/{split}"
         self.objs = os.listdir(self.dirpath)
         self.n_local_crops = n_local_crops
+        self.mask_perc = mask_perc
+        self.mask_chunk_size = mask_chunk_size
         print(f"{self.n_local_crops} local crops")
 
     def __getitem__(self, index: int) -> dict:
@@ -361,6 +392,19 @@ class ObjaverseAugmented(data.Dataset):
         point_global_aug1["path"] = obj_dir
         point_global_aug2 = global_aug(pts_xyz.numpy(), pts_rgb.numpy(), normal.numpy())
         point_global_aug2["path"] = obj_dir
+
+        # apply masks to global crops, for now we keep the masked out indices the same for the two, but
+        # we don't have to
+        n_max = np.min([point_global_aug1["feat"].shape[0], point_global_aug2["feat"].shape[0]])
+        n_slots = n_max // self.mask_chunk_size - 1
+        n_mask_slots = int(n_slots * self.mask_perc)
+        mask_slot_indices = np.random.choice(n_slots, n_mask_slots, replace=False).tolist()
+        mask_indices = []
+        for idx in mask_slot_indices:
+            mask_indices += np.arange(idx*self.mask_chunk_size, (idx+1)*self.mask_chunk_size).tolist()
+        point_global_aug1["mask_indices"] = mask_indices
+        point_global_aug2["mask_indices"] = mask_indices
+
 
         # get 8 local crops:
         local_crops_list = []
@@ -465,7 +509,7 @@ class ObjaverseFinetune(data.Dataset):
         split: str, # train/test/val
     ) -> None:
         with open(f"/data/ziqi/objaverse/labeled/split/{split}.txt", "r") as f:
-            self.obj_path_list = f.read().splitlines()[:1]
+            self.obj_path_list = f.read().splitlines()
         self.model = AutoModel.from_pretrained("google/siglip-base-patch16-224")#.cuda() # dim 768 #"google/siglip-so400m-patch14-384")
         self.tokenizer = AutoTokenizer.from_pretrained("google/siglip-base-patch16-224")#"google/siglip-so400m-patch14-384")
         
@@ -518,7 +562,7 @@ class ObjaverseFinetuneIoUEval(data.Dataset): # batch size can only be 1 for thi
         split: str, # train/test/val
     ) -> None:
         with open(f"/data/ziqi/objaverse/labeled/split/{split}.txt", "r") as f:
-            self.obj_path_list = f.read().splitlines()[:1]#[:1000]
+            self.obj_path_list = f.read().splitlines()[:1000]
         self.model = AutoModel.from_pretrained("google/siglip-base-patch16-224")#.cuda() # dim 768 #"google/siglip-so400m-patch14-384")
         self.tokenizer = AutoTokenizer.from_pretrained("google/siglip-base-patch16-224")#"google/siglip-so400m-patch14-384")
 
@@ -581,7 +625,7 @@ class ObjaverseEval3D(data.Dataset):
     def __getitem__(self, item):
         return_dict = {}
         file_path = self.obj_path_list[item]
-        classname = file_path.split("/")[-1].split("_")[0]
+        classname = " ".join(file_path.split("/")[-1].split("_")[:-1])
         pcd = o3d.io.read_point_cloud(f"{file_path}/points5000.pcd")
         with open(f"{file_path}/label_map.json") as f:
             label_dict = json.load(f)

@@ -43,8 +43,9 @@ class iBOTPatchLoss(nn.Module):
         self.async_batch_center = None
 
     @torch.no_grad()
-    def softmax_center_teacher(self, teacher_patch_tokens, teacher_temp):
-        self.apply_center_update()
+    def softmax_center_teacher(self, teacher_patch_tokens, teacher_temp, update_center=True):
+        if update_center:
+            self.apply_center_update()
         # teacher centering and sharpening
         #
         # WARNING:
@@ -59,12 +60,12 @@ class iBOTPatchLoss(nn.Module):
         # return F.softmax((teacher_patch_tokens.sub_(self.center)) / teacher_temp, dim=-1)
 
     @torch.no_grad()
-    def sinkhorn_knopp_teacher(self, teacher_output, teacher_temp, n_masked_patches_tensor, n_iterations=3):
+    def sinkhorn_knopp_teacher(self, teacher_output, teacher_temp, n_iterations=3):
         teacher_output = teacher_output.float()
+        B = teacher_output.shape[0]
         # world_size = dist.get_world_size() if dist.is_initialized() else 1
         Q = torch.exp(teacher_output / teacher_temp).t()  # Q is K-by-B for consistency with notations from our paper
         # B = Q.shape[1] * world_size # number of samples to assign
-        B = n_masked_patches_tensor
         dist.all_reduce(B)
         K = Q.shape[0]  # how many prototypes
 
@@ -106,24 +107,28 @@ class iBOTPatchLoss(nn.Module):
         self,
         student_patch_tokens_masked,
         teacher_patch_tokens_masked,
-        student_masks_flat,
+        n_objs,
         n_masked_patches=None,
         masks_weight=None,
     ):
         t = teacher_patch_tokens_masked
         s = student_patch_tokens_masked
-        # loss = torch.sum(t * F.log_softmax(s / self.student_temp, dim=-1), dim=-1)
-        loss = lossfunc(t, s, self.student_temp)
+        loss = torch.sum(t * F.log_softmax(s / self.student_temp, dim=-1), dim=-1)
+        #loss = lossfunc(t, s, self.student_temp)
+        # this is just used to equalize, such that each image/pt cloud is weighted the same,
+        # i.e. each point/patch weighted inverse to how many are masked out in an image/object
+        '''
         if masks_weight is None:
             masks_weight = (
                 (1 / student_masks_flat.sum(-1).clamp(min=1.0))
                 .unsqueeze(-1)
                 .expand_as(student_masks_flat)[student_masks_flat]
             )
+        '''
         if n_masked_patches is not None:
             loss = loss[:n_masked_patches]
         loss = loss * masks_weight
-        return -loss.sum() / student_masks_flat.shape[0]
+        return -loss.sum() / n_objs
 
     @torch.no_grad()
     def update_center(self, teacher_patch_tokens):

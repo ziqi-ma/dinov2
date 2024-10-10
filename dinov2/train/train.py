@@ -56,6 +56,12 @@ For python-based LazyConfig, use "path.key=value".
         nargs=argparse.REMAINDER,
     )
     parser.add_argument(
+        "--gather-on-cpu",
+        action="store_false",
+        help="Whether to gather the train features on cpu, slower"
+        "but useful to avoid OOM for large datasets (e.g. ImageNet22k).",
+    )
+    parser.add_argument(
         "--output-dir",
         "--output_dir",
         default="",
@@ -71,10 +77,10 @@ def build_optimizer(cfg, params_groups):
     return torch.optim.AdamW(params_groups, betas=(cfg.optim.adamw_beta1, cfg.optim.adamw_beta2))
 
 
-def build_schedulers(cfg):
+def build_schedulers(cfg, lr):
     OFFICIAL_EPOCH_LENGTH = cfg.train.OFFICIAL_EPOCH_LENGTH
     lr = dict(
-        base_value=0.000001,#cfg.optim["lr"],
+        base_value=lr,#cfg.optim["lr"],
         final_value=cfg.optim["min_lr"],
         total_iters=cfg.optim["epochs"] * OFFICIAL_EPOCH_LENGTH,
         warmup_iters=int(cfg.optim["warmup_epochs"] * OFFICIAL_EPOCH_LENGTH),
@@ -139,10 +145,10 @@ def do_test(cfg, model, test_loader, teacher_temp, train_knn_dataset_rand,
 
     if distributed.is_main_process():
         os.makedirs(eval_dir, exist_ok=True)
-        # save teacher checkpoint
-        teacher_ckp_path = os.path.join(eval_dir, "teacher_checkpoint.pth")
-        print(f"saveing teacher at {teacher_ckp_path}")
-        torch.save({"teacher": new_state_dict}, teacher_ckp_path)
+        # save checkpoint
+        model_statedict_path = os.path.join(eval_dir, "model_checkpoint.pth")
+        print(f"saving model at {model_statedict_path}")
+        torch.save(model.state_dict(), model_statedict_path)
 
     # TODO: figure out parallelization stuff, this is in the parallelized context
     global_loss_list = []
@@ -218,7 +224,15 @@ def do_test(cfg, model, test_loader, teacher_temp, train_knn_dataset_rand,
 
 
 
-def do_train(cfg, model, resume=False):
+def do_train(cfg, lr, model, resume=False, resume_path=None, start_iter=None):
+
+    start_iter = 1
+    if resume and resume_path:
+        model.load_state_dict(torch.load(resume_path))
+        print(f"loaded model from {resume_path}")
+        if start_iter:
+            start_iter = start_iter
+
     model.train()
     inputs_dtype = torch.half
     fp16_scaler = model.fp16_scaler  # for mixed precision training
@@ -232,27 +246,24 @@ def do_train(cfg, model, resume=False):
         momentum_schedule,
         teacher_temp_schedule,
         last_layer_lr_schedule,
-    ) = build_schedulers(cfg)
+    ) = build_schedulers(cfg, lr)
 
     # checkpointer
-    checkpointer = FSDPCheckpointer(model, cfg.train.output_dir, optimizer=optimizer, save_to_disk=True)
+    #checkpointer = FSDPCheckpointer(model, cfg.train.output_dir, optimizer=optimizer, save_to_disk=True)
 
-    start_iter = checkpointer.resume_or_load(cfg.MODEL.WEIGHTS, resume=resume).get("iteration", -1) + 1
+    #start_iter = checkpointer.resume_or_load(cfg.MODEL.WEIGHTS, resume=resume).get("iteration", -1) + 1
+    #print(start_iter)
+    
 
     OFFICIAL_EPOCH_LENGTH = cfg.train.OFFICIAL_EPOCH_LENGTH
     max_iter = cfg.optim.epochs * OFFICIAL_EPOCH_LENGTH
 
-    periodic_checkpointer = PeriodicCheckpointer(
-        checkpointer,
-        period=3 * OFFICIAL_EPOCH_LENGTH,
-        max_iter=max_iter,
-        max_to_keep=3,
-    )
-
-    # setup data preprocessing
-
-    img_size = cfg.crops.global_crops_size
-    patch_size = cfg.student.patch_size
+    #periodic_checkpointer = PeriodicCheckpointer(
+        #checkpointer,
+        #period=3 * OFFICIAL_EPOCH_LENGTH,
+        #max_iter=max_iter,
+        #max_to_keep=3,
+    #)
 
     # setup data loader
     train_dataset = ObjaverseAugmented(n_local_crops=cfg.crops.local_crops_number, split='train', root="/data/ziqi/objaverse/pretrain")
@@ -282,6 +293,7 @@ def do_train(cfg, model, resume=False):
         drop_last=True,
         collate_fn=collate_fn,
     )
+    print(len(train_dataset))
     val_loader = make_data_loader(
         dataset=val_dataset,
         batch_size=cfg.train.batch_size_per_gpu,
@@ -302,11 +314,8 @@ def do_train(cfg, model, resume=False):
     logger.info("Starting training from iteration {}".format(start_iter))
     metrics_file = os.path.join(cfg.train.output_dir, "training_metrics.json")
     metric_logger = MetricLogger(delimiter="  ", output_file=metrics_file)
-    header = "Training"
 
-    prev_loss = 10
-
-    for epoch in range(8):
+    for epoch in range(cfg.optim["epochs"]):
         print(f"epoch {epoch}")
         for data in train_loader:
             current_batch_size = data["offset"].shape[0] / 2
@@ -346,7 +355,6 @@ def do_train(cfg, model, resume=False):
             # perform teacher EMA update
             model.update_teacher(mom)
             
-
             # logging
 
             if distributed.get_global_size() > 1:
@@ -377,7 +385,7 @@ def do_train(cfg, model, resume=False):
             
 
             # DEBUG LOSS SPIKES
-            
+            '''
             if losses_reduced > prev_loss * 2:
                 # spikes!
                 print(f"spiking at iteration {iteration}")
@@ -387,9 +395,10 @@ def do_train(cfg, model, resume=False):
                 d = net.state_dict()
                 d.update(data)
                 torch.save(d, f"spikedata5-{iteration}.pth")
-
             prev_loss = losses_reduced
+            '''
 
+            
             # checkpointing and testing
             
             if cfg.evaluation.eval_period_iterations > 0 and (iteration + 1) % cfg.evaluation.eval_period_iterations == 0:
@@ -416,15 +425,13 @@ def do_train(cfg, model, resume=False):
                 # add to wandb logging
                 for key in knn_res.keys():
                     loss_dict_reduced[key] = knn_res[key]
-            
+                
             wandb.log(loss_dict_reduced, step=iteration, commit=True)
             
             #periodic_checkpointer.step(iteration)
 
             iteration = iteration + 1
 
-        # perform teacher EMA update, set to prev epoch
-        #model.update_teacher(0)
     metric_logger.synchronize_between_processes()
     return {k: meter.global_avg for k, meter in metric_logger.meters.items()}
 
@@ -445,12 +452,19 @@ def main(args):
             + 1
         )
         return do_test(cfg, model, f"manual_{iteration}")
+    if args.no_resume:
+        do_train(cfg, args.lr, model, resume=not args.no_resume)
+    else:
+        do_train(cfg, args.lr, model, resume=not args.no_resume, resume_path=args.resume_path, start_iter=args.pickup_iter)
 
-    do_train(cfg, model, resume=not args.no_resume)
 
 
 if __name__ == "__main__":
     args = get_args_parser(add_help=True).parse_args()
     torch.manual_seed(123)
-    
+    args.gather_on_gpu = False
+    args.lr = 2e-5 # this supercedes config since there is some calculation if you do config
+    args.no_resume=False
+    args.resume_path="/data/ziqi/training_checkpts/pretrain_encdec3/eval/training_199/model_checkpoint.pth"
+    args.pickup_iter=199
     main(args)

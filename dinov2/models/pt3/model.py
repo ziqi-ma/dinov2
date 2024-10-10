@@ -240,6 +240,7 @@ class PointSequential(PointModule):
             else:
                 if isinstance(input, Point):
                     input.feat = module(input.feat)
+                    input.cls_tokens = module(input.cls_tokens)
                     if "sparse_conv_feat" in input.keys():
                         input.sparse_conv_feat = input.sparse_conv_feat.replace_feature(
                             input.feat
@@ -384,6 +385,7 @@ class SerializedAttention(PointModule):
         pad_key = "pad"
         unpad_key = "unpad"
         cu_seqlens_key = "cu_seqlens_key"
+        pad_offset_key = "pad_offset"
         if (
             pad_key not in point.keys()
             or unpad_key not in point.keys()
@@ -435,7 +437,8 @@ class SerializedAttention(PointModule):
             point[cu_seqlens_key] = nn.functional.pad(
                 torch.concat(cu_seqlens), (0, 1), value=_offset_pad[-1]
             )
-        return point[pad_key], point[unpad_key], point[cu_seqlens_key]
+            point[pad_offset_key] = _offset_pad
+        return point[pad_key], point[unpad_key], point[cu_seqlens_key], point[pad_offset_key]
 
     def forward(self, point):
         if not self.enable_flash:
@@ -447,46 +450,123 @@ class SerializedAttention(PointModule):
         K = self.patch_size
         C = self.channels
 
-        pad, unpad, cu_seqlens = self.get_padding_and_inverse(point)
+        pad, unpad, cu_seqlens, offset_pad = self.get_padding_and_inverse(point)
+        # offset_pad is of format e.g. 0,4096,7168,12288 for batch size=3, marking which points in which chunk
+        # pad specifies the point index (padded) with total length 112288, where the first 4096 all come from 
+        # the first object (<4096 pts), etc etc
 
         order = point.serialized_order[self.order_index][pad]
         inverse = unpad[point.serialized_inverse[self.order_index]]
 
         # padding and reshape feat and batch for serialized point patch
-        qkv = self.qkv(point.feat)[order]
+        qkv = self.qkv(point.feat)[order] # TOTAL_CHUNKS,3*C
+        cls_qkv = self.qkv(point.cls_tokens) # this should be bs,3*channels
+        if torch.all(cu_seqlens % K == 0):
+            cumulative_n_chunks = offset_pad // K # this is e.g. [0 4 7 12] if total 12 chunks and 3 objects
+        else:
+            n_chunks_list = []
+            for idx in offset_pad:
+                place = (cu_seqlens == idx).nonzero().item()
+                n_chunks_list.append(place)
+            cumulative_n_chunks = torch.tensor(n_chunks_list)
+        # need to create an accumulation matrix of 1's
+        accumulation_mat = torch.zeros((len(cu_seqlens)-1,len(offset_pad)-1)).cuda().to(torch.float16) # N_CHUNKS,BS
+        for i in range(len(offset_pad)-1):
+            accumulation_mat[cumulative_n_chunks[i]:cumulative_n_chunks[i+1],i] = 1
+        # ex. 1 0 0
+        #     1 0 
+        #     1 0 0
+        #     0 1 0
+        #     0 1 0
+        #     0 0 1
+        # we want this @ the cls qkv to be
+        # cls0
+        # cls0
+        # cls0
+        # cls1
+        # cls1
+        # cls2
 
+        # we also need the inverse operation, an aggregation matrix which is transpose average
+        aggregation_mat = accumulation_mat.T / (accumulation_mat.T).sum(dim=1, keepdim=True) # BS,N_CHUNKS
+        # of format
+        # 1/3 1/3 1/3  0   0  0
+        #   0   0   0 1/2 1/2 0
+        #   0   0   0  0   0  1
+        cls_qkv_per_chunk = torch.matmul(accumulation_mat, cls_qkv).unsqueeze(1) # N_CHUNKS,1,3*C
+        
         if not self.enable_flash:
             # encode and reshape qkv: (N', K, 3, H, C') => (3, N', H, K, C')
+            # NOTE This only works if all objects have more points than patch size, if not, original PT3 code will break!!
+            # we want to prepend one qkv to each chunk based on offset_pad which is of size BS+1
+            qkv_chunked = qkv.reshape(-1,K,3*C) # (N',K,3*C)
+            qkv_chunked = torch.cat([cls_qkv_per_chunk, qkv_chunked],dim=1) # (N',K+1,3*C)
             q, k, v = (
-                qkv.reshape(-1, K, 3, H, C // H).permute(2, 0, 3, 1, 4).unbind(dim=0)
-            )
-            # attn
+                qkv_chunked.reshape(-1, K+1, 3, H, C // H).permute(2, 0, 3, 1, 4).unbind(dim=0)
+            ) # each is N_CHUNKS,H,K+1,C//H
             if self.upcast_attention:
                 q = q.float()
                 k = k.float()
-            attn = (q * self.scale) @ k.transpose(-2, -1)  # (N', H, K, K)
-            if self.enable_rpe:
+            attn = (q * self.scale) @ k.transpose(-2, -1)  # (N', H, K+1, K+1)
+            if self.enable_rpe: # TODO: this is always set to false, it will crash if set to true as of now, need to pad 0
                 attn = attn + self.rpe(self.get_rel_pos(point, order))
             if self.upcast_softmax:
                 attn = attn.float()
             attn = self.softmax(attn)
             attn = self.attn_drop(attn).to(qkv.dtype)
-            feat = (attn @ v).transpose(1, 2).reshape(-1, C)
-        else:
+            feat_chunked = (attn @ v).transpose(1, 2).reshape(-1,K+1,C) # N',K+1,C
+            feat = feat_chunked[:,1:,:].reshape(-1,C)# N'*K,C=N,C
+            cls_feats_chunked = feat_chunked[:,0,:].squeeze() # N',C
+            # we need to aggregate it back to per-object, take mean
+            cls_feat = aggregation_mat @ cls_feats_chunked
+        else: # this is true
+            # for flash attention, we need to insert the cls tokens inside the qkv
+            # if no obj is < patch size:
+            if torch.all(cu_seqlens % K == 0):
+                qkv_chunked = qkv.reshape(-1,K,3*C) # (N',K,3*C)
+                qkv_chunked = torch.cat([cls_qkv_per_chunk, qkv_chunked],dim=1) # (N',K+1,3*C)
+                qkv_chunked_collated = qkv_chunked.view(-1,3*C)
+            else:
+                # if not, this means some objects do not fill a full patch and thus is not padded
+                # and we need to chunk the chunks unevenly based on cu_seqlens
+                chunks_with_cls = []
+                for i in range(len(cu_seqlens)-1):
+                    chunks_with_cls.append(cls_qkv_per_chunk[i,:,:]) #1,3*C
+                    chunks_with_cls.append(qkv[cu_seqlens[i]:cu_seqlens[i+1],:]) #~K,3*C
+                qkv_chunked_collated = torch.cat(chunks_with_cls, dim=0)
+            cu_seqlens_new = cu_seqlens + torch.arange(0,len(cu_seqlens)).int().cuda()
             feat = flash_attn.flash_attn_varlen_qkvpacked_func(
-                qkv.half().reshape(-1, 3, H, C // H),
-                cu_seqlens,
-                max_seqlen=self.patch_size,
+                qkv_chunked_collated.half().reshape(-1, 3, H, C // H),
+                cu_seqlens_new,
+                max_seqlen=self.patch_size+1, # plus cls token
                 dropout_p=self.attn_drop if self.training else 0,
                 softmax_scale=self.scale,
-            ).reshape(-1, C)
+            ).view(-1,C) # N*(K+1),C
             feat = feat.to(qkv.dtype)
+            if torch.all(cu_seqlens % K == 0): # if no obj is < patch size:
+                feat_chunked = feat.view(-1,C).reshape(-1,K+1,C) # N',K+1,C
+                feat = feat_chunked[:,1:,:].reshape(-1,C)# N'*K,C=N,C
+                cls_feats_chunked = feat_chunked[:,0,:].squeeze() # N',C
+            else:
+                # if not, this means some objects do not fill a full patch and thus is not padded
+                # and we need to chunk the chunks unevenly based on cu_seqlens
+                point_feats = []
+                cls_feats = []
+                for i in range(len(cu_seqlens_new)-1):
+                    cls_feats.append(feat[cu_seqlens_new[i],:].unsqueeze(0)) # the shape inside is 1,C
+                    point_feats.append(feat[cu_seqlens_new[i]+1:cu_seqlens_new[i+1],:]) # the shape inside is ~K,C
+                feat = torch.cat(point_feats, dim=0) # N,C
+                cls_feats_chunked = torch.cat(cls_feats, dim=0)
+            # we need to aggregate it back to per-object, take mean
+            cls_feat = aggregation_mat @ cls_feats_chunked
+        
         feat = feat[inverse]
-
         # ffn
         feat = self.proj(feat)
+        cls_feat = self.proj_drop(cls_feat)
         feat = self.proj_drop(feat)
         point.feat = feat
+        point.cls_tokens = cls_feat
         return point
 
 
@@ -588,20 +668,24 @@ class Block(PointModule):
         point = self.cpe(point)
         point.feat = shortcut + point.feat
         shortcut = point.feat
+        shortcut_cls = point.cls_tokens
         if self.pre_norm:
-            point = self.norm1(point)
+            point = self.norm1(point) # clstokens also normalized due to implementation of PointSequential
         point = self.drop_path(self.attn(point))
         point.feat = shortcut + point.feat
+        point.cls_tokens = shortcut_cls + point.cls_tokens
         if not self.pre_norm:
-            point = self.norm1(point)
+            point = self.norm1(point) # clstokens also normalized due to implementation of PointSequential
 
         shortcut = point.feat
+        shortcut_cls = point.cls_tokens
         if self.pre_norm:
-            point = self.norm2(point)
-        point = self.drop_path(self.mlp(point))
+            point = self.norm2(point) # clstokens also normalized due to implementation of PointSequential
+        point = self.drop_path(self.mlp(point)) # clstoken also pass thru mlp due to implementation of PointSequential
         point.feat = shortcut + point.feat
+        point.cls_tokens = shortcut_cls + point.cls_tokens
         if not self.pre_norm:
-            point = self.norm2(point)
+            point = self.norm2(point) # clstokens also normalized due to implementation of PointSequential
         point.sparse_conv_feat = point.sparse_conv_feat.replace_feature(point.feat)
         #point.sparse_conv_feat.replace_feature(point.feat) old version
         return point
@@ -695,6 +779,7 @@ class SerializedPooling(PointModule):
             serialized_inverse=inverse,
             serialized_depth=point.serialized_depth - pooling_depth,
             batch=point.batch[head_indices],
+            cls_tokens = self.proj(point["cls_tokens"])
         )
 
         if "condition" in point.keys():
@@ -707,9 +792,9 @@ class SerializedPooling(PointModule):
             point_dict["pooling_parent"] = point
         point = Point(point_dict)
         if self.norm is not None:
-            point = self.norm(point)
+            point = self.norm(point) # this acts on cls_tokens too 
         if self.act is not None:
-            point = self.act(point)
+            point = self.act(point) # this acts on cls_tokens too 
         point.sparsify()
         return point
 
@@ -743,9 +828,10 @@ class SerializedUnpooling(PointModule):
         assert "pooling_inverse" in point.keys()
         parent = point.pop("pooling_parent")
         inverse = point.pop("pooling_inverse")
-        point = self.proj(point)
-        parent = self.proj_skip(parent)
-        parent.feat = parent.feat + point.feat[inverse]
+        point = self.proj(point) # this also applies to cls_tokens due to PointSequential implementation
+        parent = self.proj_skip(parent) # this also applies to cls_tokens due to PointSequential implementation
+        parent.feat = parent.feat + point.feat[inverse] # this is broadcasting, inverse is a vector like [1 2 1 1 2 4 3 3]
+        parent.cls_tokens = parent.cls_tokens + point.cls_tokens
 
         if self.traceable:
             parent["unpooling_parent"] = point
@@ -761,7 +847,7 @@ class Embedding(PointModule):
         act_layer=None,
     ):
         super().__init__()
-        self.in_channels = in_channels
+        self.clstoken_embedding = nn.Parameter(torch.randn(1, embed_channels)).to(torch.float16).cuda()
         self.embed_channels = embed_channels
 
         # TODO: check remove spconv
@@ -781,7 +867,10 @@ class Embedding(PointModule):
             self.stem.add(act_layer(), name="act")
 
     def forward(self, point: Point):
+        bs = int(point["batch"].max()+1)
+        point["cls_tokens"] = torch.matmul(torch.ones(bs, 1).to(torch.float16).cuda(), self.clstoken_embedding)
         point = self.stem(point)
+        # add cls token per object
         return point
 
 
@@ -790,7 +879,7 @@ class PointTransformerV3(PointModule):
         self,
         in_channels=6,
         order=("z", "z-trans", "hilbert", "hilbert-trans"),
-        stride=(2, 2, 2, 1),
+        stride=(2, 2, 2, 2),
         enc_depths=(2, 2, 2, 6, 2),
         enc_channels=(32, 64, 128, 256, 512),
         enc_num_head=(2, 4, 8, 16, 32),
@@ -824,8 +913,9 @@ class PointTransformerV3(PointModule):
         self.order = [order] if isinstance(order, str) else order
         self.cls_mode = cls_mode
         self.shuffle_orders = shuffle_orders
-        self.embed_dim = enc_channels[-1]
+        self.embed_dim = dec_channels[0]
         self.norm = torch.nn.LayerNorm(self.embed_dim, eps=1e-6)
+        self.mask_token = nn.Parameter(torch.zeros(1, enc_channels[0])).cuda()
 
         assert self.num_stages == len(stride) + 1
         assert self.num_stages == len(enc_depths)
@@ -917,6 +1007,54 @@ class PointTransformerV3(PointModule):
                 )
             if len(enc) != 0:
                 self.enc.add(module=enc, name=f"enc{s}")
+        
+        # decoder
+        dec_drop_path = [
+            x.item() for x in torch.linspace(0, drop_path, sum(dec_depths))
+        ]
+        self.dec = PointSequential()
+        dec_channels = list(dec_channels) + [enc_channels[-1]]
+        for s in reversed(range(self.num_stages - 1)):
+            dec_drop_path_ = dec_drop_path[
+                sum(dec_depths[:s]) : sum(dec_depths[: s + 1])
+            ]
+            dec_drop_path_.reverse()
+            dec = PointSequential()
+            dec.add(
+                SerializedUnpooling(
+                    in_channels=dec_channels[s + 1],
+                    skip_channels=enc_channels[s],
+                    out_channels=dec_channels[s],
+                    norm_layer=bn_layer,
+                    act_layer=act_layer,
+                ),
+                name="up",
+            )
+            for i in range(dec_depths[s]):
+                dec.add(
+                    Block(
+                        channels=dec_channels[s],
+                        num_heads=dec_num_head[s],
+                        patch_size=dec_patch_size[s],
+                        mlp_ratio=mlp_ratio,
+                        qkv_bias=qkv_bias,
+                        qk_scale=qk_scale,
+                        attn_drop=attn_drop,
+                        proj_drop=proj_drop,
+                        drop_path=dec_drop_path_[i],
+                        norm_layer=ln_layer,
+                        act_layer=act_layer,
+                        pre_norm=pre_norm,
+                        order_index=i % len(self.order),
+                        cpe_indice_key=f"stage{s}",
+                        enable_rpe=enable_rpe,
+                        enable_flash=enable_flash,
+                        upcast_attention=upcast_attention,
+                        upcast_softmax=upcast_softmax,
+                    ),
+                    name=f"block{i}",
+                )
+            self.dec.add(module=dec, name=f"dec{s}")
 
     def get_embedding(self, data_dict):
         point = Point(data_dict)
@@ -925,7 +1063,7 @@ class PointTransformerV3(PointModule):
         point = self.embedding(point)
         return point
 
-    def get_feats(self, data_dict):
+    def get_feats(self, data_dict, apply_mask=False, return_mask_patches=False):
         """
         A data_dict is a dictionary containing properties of a batched point cloud.
         It should contain the following properties for PTv3:
@@ -937,8 +1075,14 @@ class PointTransformerV3(PointModule):
         point.serialization(order=self.order, shuffle_orders=self.shuffle_orders)
         point.sparsify()
         point = self.embedding(point)
-        point = self.enc(point) #23,512
+        # apply mask
+        if apply_mask:
+            point.feat[data_dict["mask_indices"],:] = self.mask_token.to(point.feat.dtype)
 
+        point = self.enc(point) #23,512
+        point = self.dec(point)
+        batch_idx = point["batch"] # in the format of 00..011...1...(b-1)...(b-1)
+        '''
         unpooled_feats = point["feat"] #n_batch_pts, 512
         patch_coord = point["coord"]
         batch_idx = point["batch"] # in the format of 00..011...1...(b-1)...(b-1)
@@ -952,25 +1096,36 @@ class PointTransformerV3(PointModule):
         #  0 ...            0 1...]
         M = torch.nn.functional.normalize(M, p=1, dim=1)#.half()# - weird, for training we need half but for eval float
         pooled_feats = torch.mm(M, unpooled_feats) # B, 512
-        
+        '''
+        pooled_feats = point.cls_tokens
+        unpooled_feats = point["feat"]
 
-        normed_pooled_feats = self.norm(pooled_feats) # normalize on the 512 dim
-        normed_unpooled_feats = self.norm(unpooled_feats) # normalize on the 512 dim
-        return {
+        normed_pooled_feats = self.norm(pooled_feats) # normalize on the 64 dim
+        normed_unpooled_feats = self.norm(unpooled_feats) # normalize on the 64 dim
+        res = {
                     "x_norm_clstoken": normed_pooled_feats,
-                    "x_norm_patchtokens": normed_unpooled_feats,
-                    "patch_coord":patch_coord,
+                    #"patch_coord":patch_coord,
                     "batch_idx": batch_idx
                 }
+        
+        if return_mask_patches:
+            try:
+                patch_tokens = normed_unpooled_feats[data_dict["mask_indices"],:]
+            except Exception:
+                print(data_dict["mask_indices"])
+                print(normed_pooled_feats.shape)
+                print(data_dict["offset"])    
+            res["x_norm_patchtokens"] = patch_tokens
+        return res
 
 
-    def forward(self, data_dict, is_training = False, include_local=False):
-        global_dict = self.get_feats(data_dict)
+    def forward(self, data_dict, is_training = False, include_local=False, apply_mask=False): # apply_mask True only for student
+        global_dict = self.get_feats(data_dict, apply_mask=apply_mask, return_mask_patches=is_training) # global: always return mask patches if training, regardless of teacher or student
         if is_training:
             if include_local:
-                local_dict = self.get_feats(data_dict["local_crops"])
+                # no masking on local patches
+                local_dict = self.get_feats(data_dict["local_crops"], apply_mask=False, return_mask_patches=False)
                 global_dict["local_x_norm_clstoken"] = local_dict["x_norm_clstoken"]
-                global_dict["local_x_patchtokens"] = local_dict["x_norm_patchtokens"]
             return global_dict
         else:
             return global_dict["x_norm_clstoken"]

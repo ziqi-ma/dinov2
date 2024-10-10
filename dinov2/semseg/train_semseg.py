@@ -271,7 +271,7 @@ if __name__ == "__main__":
     args.lr=6e-5
     args.min_lr = 0#args.lr/10
     args.n_epoch=1000#10
-    args.batch_size=1#6
+    args.batch_size=3
     args.seed = 123
     torch.manual_seed(args.seed)
     train_semseg_model(args)
