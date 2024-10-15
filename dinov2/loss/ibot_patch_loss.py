@@ -62,11 +62,11 @@ class iBOTPatchLoss(nn.Module):
     @torch.no_grad()
     def sinkhorn_knopp_teacher(self, teacher_output, teacher_temp, n_iterations=3):
         teacher_output = teacher_output.float()
-        B = teacher_output.shape[0]
-        # world_size = dist.get_world_size() if dist.is_initialized() else 1
+        world_size = dist.get_world_size() if dist.is_initialized() else 1
         Q = torch.exp(teacher_output / teacher_temp).t()  # Q is K-by-B for consistency with notations from our paper
-        # B = Q.shape[1] * world_size # number of samples to assign
-        dist.all_reduce(B)
+        B = Q.shape[1] * world_size # number of samples to assign
+        if dist.is_initialized():
+            dist.all_reduce(B)
         K = Q.shape[0]  # how many prototypes
 
         # make the matrix sums to 1
@@ -128,6 +128,8 @@ class iBOTPatchLoss(nn.Module):
         if n_masked_patches is not None:
             loss = loss[:n_masked_patches]
         loss = loss * masks_weight
+        if masks_weight is not None:
+            return -loss.sum()/masks_weight.sum()
         return -loss.sum() / n_objs
 
     @torch.no_grad()

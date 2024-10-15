@@ -292,6 +292,8 @@ def collate_fn_base(batch):
         # str is also a kind of Sequence, judgement should before Sequence
         return list(batch)
     elif isinstance(batch[0], Sequence):
+        if len(batch[0]) == 0: # empty list
+            return batch
         if isinstance(batch[0][0], str):
             return batch
         if isinstance(batch[0][0], int):
@@ -376,15 +378,20 @@ class ObjaverseAugmented(data.Dataset):
         mask_chunk_size = 10
     ) -> None:
         self.dirpath = f"{root}/{split}"
-        self.objs = os.listdir(self.dirpath)
+        self.objs = [f"{root}/{split}/{obj}" for obj in os.listdir(self.dirpath)]
+        # for training, append the larger dataset
+        if split == "train":
+            larger_set_objs = os.listdir("/data/ziqi/objaverse/pretrain-large/train")
+            self.objs = self.objs + [f"/data/ziqi/objaverse/pretrain-large/train/{obj}" for obj in larger_set_objs]
+
         self.n_local_crops = n_local_crops
         self.mask_perc = mask_perc
         self.mask_chunk_size = mask_chunk_size
+        print(f"total {len(self.objs)} objs")
         print(f"{self.n_local_crops} local crops")
 
     def __getitem__(self, index: int) -> dict:
-        cur_obj = self.objs[index]
-        obj_dir = f"{self.dirpath}/{cur_obj}"
+        obj_dir = self.objs[index]
         pts_xyz = torch.load(f"{obj_dir}/points.pt")
         normal = torch.load(f"{obj_dir}/normals.pt")
         pts_rgb = torch.load(f"{obj_dir}/rgb.pt")*255 #torch.ones(normal.shape)*127.5 #
@@ -398,10 +405,14 @@ class ObjaverseAugmented(data.Dataset):
         n_max = np.min([point_global_aug1["feat"].shape[0], point_global_aug2["feat"].shape[0]])
         n_slots = n_max // self.mask_chunk_size - 1
         n_mask_slots = int(n_slots * self.mask_perc)
-        mask_slot_indices = np.random.choice(n_slots, n_mask_slots, replace=False).tolist()
-        mask_indices = []
-        for idx in mask_slot_indices:
-            mask_indices += np.arange(idx*self.mask_chunk_size, (idx+1)*self.mask_chunk_size).tolist()
+        if n_slots < 10:
+            print(obj_dir) # remove
+            mask_indices = []
+        else:
+            mask_slot_indices = np.random.choice(n_slots, n_mask_slots, replace=False).tolist()
+            mask_indices = []
+            for idx in mask_slot_indices:
+                mask_indices += np.arange(idx*self.mask_chunk_size, (idx+1)*self.mask_chunk_size).tolist()
         point_global_aug1["mask_indices"] = mask_indices
         point_global_aug2["mask_indices"] = mask_indices
 

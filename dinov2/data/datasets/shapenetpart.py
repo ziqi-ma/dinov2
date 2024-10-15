@@ -117,12 +117,19 @@ class EvalShapeNetPart(data.Dataset):
         pcd.estimate_normals(search_param=o3d.geometry.KDTreeSearchParamHybrid(radius=0.1, max_nn=30))
 
         pts_xyz = torch.tensor(pointcloud).float()
-        pts_rgb = torch.ones(pts_xyz.shape)*255 # no color
+        pts_rgb = torch.ones(pts_xyz.shape)*127.5 # no color
         normal = torch.tensor(np.asarray(pcd.normals))
 
         if self.apply_rotation:
             pts_xyz = rotate_pts(pts_xyz, rot)
             normal = rotate_pts(normal, rot)
+
+        # normalize
+        # this is the same preprocessing I do before training
+        center = pointcloud.mean(0)
+        scale = np.abs(pointcloud-center).max()
+        pointcloud -= center
+        pointcloud *= (0.75 / float(scale)) # put in 0.75-size box
         
         return_dict = prep_points_val3d(pts_xyz, pts_rgb, normal, gt)
 

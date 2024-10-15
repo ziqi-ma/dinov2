@@ -64,14 +64,21 @@ class EvalPartNetE(data.Dataset):
         rot = torch.load(f"{file_path}/rand_rotation.pt")
         
         pts_xyz = torch.tensor(np.asarray(pcd.points)).float()
-        pts_rgb = torch.tensor(np.asarray(pcd.colors)).float()
-        pcd.estimate_normals(search_param=o3d.geometry.KDTreeSearchParamHybrid(radius=0.1, max_nn=30))
+        pts_rgb = torch.tensor(np.asarray(pcd.colors)).float()*255
+        pcd.estimate_normals(search_param=o3d.geometry.KDTreeSearchParamHybrid(radius=0.1, max_nn=300))
         normal = torch.tensor(np.asarray(pcd.normals)).float()
         
         if self.apply_rotation:
             pts_xyz = rotate_pts(pts_xyz, rot)
             normal = rotate_pts(normal, rot)
             
+        # normalize
+        # this is the same preprocessing I do before training
+        center = pts_xyz.mean(0)
+        scale = max((pts_xyz - center).abs().max(0)[0])
+        pts_xyz -= center
+        pts_xyz *= (0.75 / float(scale)) # put in 0.75-size box
+        
         # subsample 5000 pts
         random_indices = torch.randint(0, pts_xyz.shape[0], (5000,))
         pts_xyz_subsampled = pts_xyz[random_indices]

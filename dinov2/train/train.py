@@ -224,14 +224,14 @@ def do_test(cfg, model, test_loader, teacher_temp, train_knn_dataset_rand,
 
 
 
-def do_train(cfg, lr, model, resume=False, resume_path=None, start_iter=None):
+def do_train(cfg, lr, model, resume=False, resume_path=None, pickup_iter=None):
 
     start_iter = 1
     if resume and resume_path:
         model.load_state_dict(torch.load(resume_path))
         print(f"loaded model from {resume_path}")
-        if start_iter:
-            start_iter = start_iter
+        if pickup_iter:
+            start_iter = pickup_iter
 
     model.train()
     inputs_dtype = torch.half
@@ -455,16 +455,21 @@ def main(args):
     if args.no_resume:
         do_train(cfg, args.lr, model, resume=not args.no_resume)
     else:
-        do_train(cfg, args.lr, model, resume=not args.no_resume, resume_path=args.resume_path, start_iter=args.pickup_iter)
+        do_train(cfg, args.lr, model, resume=not args.no_resume, resume_path=args.resume_path, pickup_iter=args.pickup_iter)
 
 
 
 if __name__ == "__main__":
     args = get_args_parser(add_help=True).parse_args()
-    torch.manual_seed(123)
+    seed=123
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    np.random.seed(seed)
+    random.seed(seed)
     args.gather_on_gpu = False
-    args.lr = 2e-5 # this supercedes config since there is some calculation if you do config
-    args.no_resume=False
-    args.resume_path="/data/ziqi/training_checkpts/pretrain_encdec3/eval/training_199/model_checkpoint.pth"
-    args.pickup_iter=199
+    args.lr = 2e-6 # this supercedes config since there is some calculation if you do config
+    args.no_resume=True
+    #args.resume_path="/data/ziqi/training_checkpts/pretrain_encdec3/eval/training_199/model_checkpoint.pth"
+    #args.pickup_iter=199
     main(args)
