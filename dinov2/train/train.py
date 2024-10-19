@@ -468,7 +468,7 @@ if __name__ == "__main__":
     np.random.seed(seed)
     random.seed(seed)
     args.gather_on_gpu = False
-    args.lr = 2e-6 # this supercedes config since there is some calculation if you do config
+    args.lr = 2e-5 # this supercedes config since there is some calculation if you do config
     args.no_resume=True
     #args.resume_path="/data/ziqi/training_checkpts/pretrain_encdec3/eval/training_199/model_checkpoint.pth"
     #args.pickup_iter=199

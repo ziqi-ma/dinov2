@@ -378,7 +378,9 @@ class ObjaverseAugmented(data.Dataset):
         mask_chunk_size = 10
     ) -> None:
         self.dirpath = f"{root}/{split}"
-        self.objs = [f"{root}/{split}/{obj}" for obj in os.listdir(self.dirpath)]
+        with open(f'/data/ziqi/objaverse/pretrain/{split}.txt', 'r') as f:
+            nameids = f.read().splitlines()
+        self.objs = [f"{root}/{split}/{obj}" for obj in nameids]
         # for training, append the larger dataset
         if split == "train":
             larger_set_objs = os.listdir("/data/ziqi/objaverse/pretrain-large/train")

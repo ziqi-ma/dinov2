@@ -67,7 +67,7 @@ train:
   num_workers: 10
   OFFICIAL_EPOCH_LENGTH: 2725
   cache_dataset: true
-  centering: "centering"
+  centering: "sinkhorn_knopp"
 student:
   arch: vit_large
   patch_size: 16
